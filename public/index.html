@@ -136,7 +136,18 @@
           <div class="profile-username" id="profile-name">–</div>
         </div>
       </div>
-      <div class="section-label">Meine Fahrten</div>
+      <div class="section-label">Freunde</div>
+      <div class="friend-search-wrap">
+        <input type="text" id="friend-search" placeholder="Nutzername suchen…" autocomplete="off">
+      </div>
+      <div id="friend-search-results" hidden></div>
+      <div id="friend-requests-wrap" hidden>
+        <div class="section-label" style="margin-top:12px">Anfragen</div>
+        <div id="friend-requests-list"></div>
+      </div>
+      <div id="friends-list"></div>
+
+      <div class="section-label" style="margin-top:20px">Meine Fahrten</div>
       <div id="history-list"></div>
       <div style="height:16px"></div>
       <button class="btn secondary" id="btn-logout">Abmelden</button>

@@ -63,6 +63,16 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_gps_ride ON gps_points(ride_id, ts);
   CREATE INDEX IF NOT EXISTS idx_rides_status ON rides(status);
+  CREATE TABLE IF NOT EXISTS friendships (
+    id INTEGER PRIMARY KEY,
+    requester_id INTEGER NOT NULL,
+    addressee_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at INTEGER DEFAULT (unixepoch()),
+    UNIQUE(requester_id, addressee_id),
+    FOREIGN KEY (requester_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY (addressee_id) REFERENCES users(id) ON DELETE CASCADE
+  );
 `);
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -243,7 +253,7 @@ const server = http.createServer(async (req, res) => {
     return json(res, 200, { ok: true });
   }
 
-  // Rides list
+  // Rides list – only own rides + friends' rides
   if (p === '/api/rides' && req.method === 'GET') {
     const rides = db.prepare(`
       SELECT r.*, u.username AS driver_name, u.avatar_color AS driver_color, u.avatar_data AS driver_avatar,
@@ -252,10 +262,18 @@ const server = http.createServer(async (req, res) => {
         (SELECT lng FROM gps_points WHERE ride_id = r.id ORDER BY ts DESC LIMIT 1) AS last_lng,
         (SELECT speed FROM gps_points WHERE ride_id = r.id ORDER BY ts DESC LIMIT 1) AS last_speed
       FROM rides r JOIN users u ON u.id = r.driver_id
-      WHERE r.status = 'active'
-         OR (r.status = 'ended' AND r.ended_at > unixepoch() - 1800)
+      WHERE (r.status = 'active' OR (r.status = 'ended' AND r.ended_at > unixepoch() - 1800))
+        AND (
+          r.driver_id = ?
+          OR EXISTS (
+            SELECT 1 FROM friendships f
+            WHERE f.status = 'accepted'
+              AND ((f.requester_id = ? AND f.addressee_id = r.driver_id)
+                OR (f.addressee_id = ? AND f.requester_id = r.driver_id))
+          )
+        )
       ORDER BY r.status DESC, r.started_at DESC
-    `).all();
+    `).all(user.id, user.id, user.id);
     return json(res, 200, { rides });
   }
 
@@ -382,6 +400,84 @@ const server = http.createServer(async (req, res) => {
       ORDER BY r.ended_at DESC LIMIT 50
     `).all(user.id, user.id);
     return json(res, 200, { rides });
+  }
+
+  // ── Friends ──────────────────────────────────────────────────────────────────
+
+  // Search users
+  if (p === '/api/users/search' && req.method === 'GET') {
+    const q = url.searchParams.get('q')?.trim();
+    if (!q || q.length < 2) return json(res, 400, { error: 'Mindestens 2 Zeichen.' });
+    const users = db.prepare(`
+      SELECT u.id, u.username, u.avatar_color, u.avatar_data,
+        COALESCE((
+          SELECT f.status FROM friendships f
+          WHERE (f.requester_id = ? AND f.addressee_id = u.id)
+             OR (f.addressee_id = ? AND f.requester_id = u.id)
+        ), 'none') AS friendship_status,
+        CASE WHEN EXISTS (
+          SELECT 1 FROM friendships f
+          WHERE f.requester_id = ? AND f.addressee_id = u.id
+        ) THEN 1 ELSE 0 END AS i_requested
+      FROM users u
+      WHERE u.username LIKE ? AND u.id != ?
+      LIMIT 20
+    `).all(user.id, user.id, user.id, `%${q}%`, user.id);
+    return json(res, 200, { users });
+  }
+
+  // Send friend request
+  if (p === '/api/friends/request' && req.method === 'POST') {
+    const { userId } = body;
+    if (!userId || userId === user.id) return json(res, 400, { error: 'Ungültig.' });
+    const existing = db.prepare('SELECT id, status FROM friendships WHERE (requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?)').get(user.id, userId, userId, user.id);
+    if (existing) return json(res, 409, { error: existing.status === 'accepted' ? 'Bereits befreundet.' : 'Anfrage bereits gesendet.' });
+    db.prepare('INSERT INTO friendships (requester_id, addressee_id) VALUES (?, ?)').run(user.id, userId);
+    return json(res, 200, { ok: true });
+  }
+
+  // Respond to friend request
+  if (p === '/api/friends/respond' && req.method === 'POST') {
+    const { requesterId, action } = body;
+    const f = db.prepare('SELECT id FROM friendships WHERE requester_id=? AND addressee_id=? AND status=?').get(requesterId, user.id, 'pending');
+    if (!f) return json(res, 404, { error: 'Anfrage nicht gefunden.' });
+    if (action === 'accept') {
+      db.prepare("UPDATE friendships SET status='accepted' WHERE id=?").run(f.id);
+    } else {
+      db.prepare('DELETE FROM friendships WHERE id=?').run(f.id);
+    }
+    return json(res, 200, { ok: true });
+  }
+
+  // List friends
+  if (p === '/api/friends' && req.method === 'GET') {
+    const friends = db.prepare(`
+      SELECT u.id, u.username, u.avatar_color, u.avatar_data,
+        EXISTS(SELECT 1 FROM rides r WHERE r.driver_id=u.id AND r.status='active') AS is_driving
+      FROM friendships f
+      JOIN users u ON u.id = CASE WHEN f.requester_id=? THEN f.addressee_id ELSE f.requester_id END
+      WHERE (f.requester_id=? OR f.addressee_id=?) AND f.status='accepted'
+      ORDER BY u.username
+    `).all(user.id, user.id, user.id);
+    return json(res, 200, { friends });
+  }
+
+  // Pending friend requests (incoming)
+  if (p === '/api/friends/requests' && req.method === 'GET') {
+    const requests = db.prepare(`
+      SELECT u.id, u.username, u.avatar_color, u.avatar_data, f.id AS friendship_id, f.created_at
+      FROM friendships f JOIN users u ON u.id = f.requester_id
+      WHERE f.addressee_id=? AND f.status='pending'
+      ORDER BY f.created_at DESC
+    `).all(user.id);
+    return json(res, 200, { requests });
+  }
+
+  // Remove friend
+  if (p === '/api/friends/remove' && req.method === 'POST') {
+    const { userId } = body;
+    db.prepare('DELETE FROM friendships WHERE (requester_id=? AND addressee_id=?) OR (requester_id=? AND addressee_id=?)').run(user.id, userId, userId, user.id);
+    return json(res, 200, { ok: true });
   }
 
   json(res, 404, { error: 'Route nicht gefunden.' });

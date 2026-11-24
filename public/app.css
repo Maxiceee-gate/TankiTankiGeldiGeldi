@@ -560,6 +560,34 @@ button, input, select, textarea {
 .history-left small { display: block; font-size: 12px; font-weight: 600; color: var(--mu); margin-top: 2px; }
 .history-cost { font-family: 'Syne', sans-serif; font-size: 18px; font-weight: 800; color: var(--ac); }
 
+/* ── Friends ─────────────────────────────────────────────────────────────────── */
+.friend-search-wrap { margin-bottom: 8px; }
+.friend-search-wrap input {
+  width: 100%; padding: 10px 14px; border-radius: var(--r-md);
+  border: 1.5px solid var(--brd); background: var(--surf); color: var(--tx);
+  font-size: 14px; font-family: 'Nunito', sans-serif; box-sizing: border-box;
+}
+.friend-search-wrap input:focus { outline: none; border-color: var(--ac); }
+.friend-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 12px; background: var(--surf); border-radius: var(--r-md);
+  margin-bottom: 6px;
+}
+.friend-av {
+  width: 36px; height: 36px; border-radius: 50%; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-weight: 800; font-size: 15px; color: #fff; font-family: 'Syne', sans-serif;
+}
+.friend-name { font-size: 14px; font-weight: 700; color: var(--tx); flex: 1; }
+.friend-name small { display: block; font-size: 11px; font-weight: 600; color: var(--mu); }
+.friend-btn {
+  padding: 5px 12px; border-radius: 20px; border: 1.5px solid var(--ac);
+  background: transparent; color: var(--ac); font-size: 12px; font-weight: 700;
+  cursor: pointer; white-space: nowrap; font-family: 'Nunito', sans-serif;
+}
+.friend-btn.accept { background: var(--ac); color: #fff; }
+.friend-btn.danger { border-color: var(--mu); color: var(--mu); }
+
 /* ── Fuel sheet (bottom sheet) ───────────────────────────────────────────────── */
 .sheet-backdrop {
   position: fixed;

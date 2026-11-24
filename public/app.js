@@ -57,6 +57,7 @@ function showLoggedIn() {
   connectWS();
   startGPS();
   renderProfileHead();
+  setupFriendSearch();
 }
 
 // ── Routing ───────────────────────────────────────────────────────────────────
@@ -665,9 +666,107 @@ function handleWSMsg(msg) {
   }
 }
 
+// ── Friends ───────────────────────────────────────────────────────────────────
+function friendAv(u) {
+  if (u.avatar_data) return `<img src="${u.avatar_data}" style="width:36px;height:36px;border-radius:50%;object-fit:cover">`;
+  const c = u.avatar_color || '#C95B18';
+  return `<div class="friend-av" style="background:${c}22;color:${c}">${esc((u.username||'?').slice(0,2).toUpperCase())}</div>`;
+}
+
+async function loadFriends() {
+  const [fr, reqs] = await Promise.all([api('GET', '/api/friends'), api('GET', '/api/friends/requests')]);
+
+  // Pending requests
+  const reqWrap = el('friend-requests-wrap');
+  const reqList = el('friend-requests-list');
+  if (reqs?.requests?.length) {
+    reqWrap.hidden = false;
+    reqList.innerHTML = reqs.requests.map(u => `
+      <div class="friend-row" data-uid="${u.id}">
+        ${friendAv(u)}
+        <div class="friend-name">${esc(u.username)}<small>möchte dich als Freund hinzufügen</small></div>
+        <button class="friend-btn accept" data-action="accept" data-uid="${u.id}">Annehmen</button>
+        <button class="friend-btn danger" data-action="decline" data-uid="${u.id}" style="margin-left:4px">✕</button>
+      </div>
+    `).join('');
+  } else {
+    reqWrap.hidden = true;
+  }
+
+  // Friends list
+  const list = el('friends-list');
+  if (!fr?.friends?.length) {
+    list.innerHTML = `<div style="color:var(--mu);font-size:13px;font-weight:600;padding:8px 0">Noch keine Freunde. Suche nach Nutzernamen oben.</div>`;
+    return;
+  }
+  list.innerHTML = fr.friends.map(u => `
+    <div class="friend-row">
+      ${friendAv(u)}
+      <div class="friend-name">${esc(u.username)}${u.is_driving ? '<small style="color:var(--ac)">🚗 fährt gerade</small>' : ''}</div>
+      <button class="friend-btn danger" data-remove="${u.id}">Entfernen</button>
+    </div>
+  `).join('');
+
+  list.addEventListener('click', async e => {
+    const btn = e.target.closest('[data-remove]');
+    if (btn) {
+      await api('POST', '/api/friends/remove', { userId: +btn.dataset.remove });
+      loadFriends();
+    }
+  });
+}
+
+function setupFriendSearch() {
+  const inp = el('friend-search');
+  const results = el('friend-search-results');
+  let timer;
+  inp.addEventListener('input', () => {
+    clearTimeout(timer);
+    const q = inp.value.trim();
+    if (q.length < 2) { results.hidden = true; return; }
+    timer = setTimeout(async () => {
+      const r = await api('GET', `/api/users/search?q=${encodeURIComponent(q)}`);
+      if (!r?.users) return;
+      if (!r.users.length) {
+        results.hidden = false;
+        results.innerHTML = `<div style="color:var(--mu);font-size:13px;padding:8px 0">Niemanden gefunden.</div>`;
+        return;
+      }
+      results.hidden = false;
+      results.innerHTML = r.users.map(u => {
+        let btn = '';
+        if (u.friendship_status === 'accepted') btn = `<span style="color:var(--mu);font-size:12px;font-weight:700">Befreundet</span>`;
+        else if (u.friendship_status === 'pending' && u.i_requested) btn = `<span style="color:var(--mu);font-size:12px;font-weight:700">Anfrage gesendet</span>`;
+        else if (u.friendship_status === 'pending') btn = `<span style="color:var(--mu);font-size:12px;font-weight:700">Hat dich angefragt</span>`;
+        else btn = `<button class="friend-btn" data-add="${u.id}">Hinzufügen</button>`;
+        return `<div class="friend-row">${friendAv(u)}<div class="friend-name">${esc(u.username)}</div>${btn}</div>`;
+      }).join('');
+    }, 350);
+  });
+
+  results.addEventListener('click', async e => {
+    const btn = e.target.closest('[data-add]');
+    if (btn) {
+      await api('POST', '/api/friends/request', { userId: +btn.dataset.add });
+      inp.value = '';
+      results.hidden = true;
+      loadFriends();
+    }
+  });
+}
+
+// Friend request accept/decline handler (delegated on the requests list)
+el('friend-requests-list').addEventListener('click', async e => {
+  const btn = e.target.closest('[data-action]');
+  if (!btn) return;
+  await api('POST', '/api/friends/respond', { requesterId: +btn.dataset.uid, action: btn.dataset.action });
+  loadFriends();
+});
+
 // ── Profile ───────────────────────────────────────────────────────────────────
 async function loadProfile() {
   renderProfileHead();
+  loadFriends();
   const r = await api('GET', '/api/my-rides');
   const list = el('history-list');
   if (!r?.rides?.length) {
