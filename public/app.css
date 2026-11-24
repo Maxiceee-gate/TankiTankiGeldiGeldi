@@ -326,6 +326,8 @@ sup { font-size: .6em; vertical-align: .45em; margin-left: 1px; }
   width: 100%; max-height: 88vh; overflow-y: auto; background: var(--s1); border-radius: 24px 24px 0 0;
   padding: 6px max(18px, var(--sr)) calc(var(--sb) + 18px) max(18px, var(--sl)); animation: up .25s cubic-bezier(.2, .9, .3, 1);
 }
+.sheet.tall { min-height: 85vh; }
+.sheet { overscroll-behavior: contain; will-change: transform; }
 .sheet h3 { font-size: 26px; font-weight: 800; text-transform: uppercase; line-height: 1.05; margin-bottom: 6px; }
 .sheet > p { color: var(--mu); margin: 0 0 18px; }
 .sheet .center { text-align: center; margin-bottom: 14px; }

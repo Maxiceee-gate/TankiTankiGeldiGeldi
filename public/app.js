@@ -118,9 +118,14 @@ function toast(msg, kind = '', action = null) {
 }
 
 // ── Sheets ────────────────────────────────────────────────────────────────────
-function openSheet(html, onClose = null) {
+function openSheet(html, onClose = null, tall = false) {
   if (S.sheetClose) { const f = S.sheetClose; S.sheetClose = null; f(); }
-  $('sheet').innerHTML = `<div class="grab"></div>${html}`;
+  const sh = $('sheet');
+  sh.style.transform = '';
+  sh.style.transition = '';
+  sh.classList.toggle('tall', tall);
+  sh.scrollTop = 0;
+  sh.innerHTML = `<div class="grab"></div>${html}`;
   $('sheet-bg').hidden = false;
   S.sheetClose = onClose;
 }
@@ -141,6 +146,41 @@ function confirmSheet(title, text, label, fn, danger = false) {
     <button class="btn ghost" data-act="close">Abbrechen</button>`);
 }
 
+// Popup sheets: swipe down (from the top of their content) to close
+function setupSheetSwipe() {
+  const sh = $('sheet');
+  let mode = null, y0 = 0, dy = 0, lastY = 0, lastT = 0, vel = 0;
+  sh.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1 || e.target.closest('input, select, textarea')) { mode = 'off'; return; }
+    mode = null; y0 = lastY = e.touches[0].clientY; lastT = performance.now(); dy = 0; vel = 0;
+  }, { passive: true });
+  sh.addEventListener('touchmove', e => {
+    if (mode === 'off' || mode === 'scroll') return;
+    const y = e.touches[0].clientY, d = y - y0;
+    if (mode === null) {
+      if (Math.abs(d) < 6) return;
+      mode = d > 0 && sh.scrollTop <= 0 ? 'drag' : 'scroll';
+      if (mode === 'scroll') return;
+      sh.style.transition = 'none';
+    }
+    e.preventDefault();
+    const t = performance.now();
+    vel = (y - lastY) / Math.max(t - lastT, 1);
+    lastY = y; lastT = t;
+    dy = Math.max(0, d);
+    sh.style.transform = `translate3d(0,${dy}px,0)`;
+  }, { passive: false });
+  sh.addEventListener('touchend', () => {
+    if (mode !== 'drag') { mode = null; return; }
+    mode = null;
+    sh.style.transition = 'transform .22s ease-out';
+    if (dy > sh.offsetHeight * 0.25 || vel > 0.5) {
+      sh.style.transform = 'translate3d(0,100%,0)';
+      setTimeout(closeSheet, 200);
+    } else sh.style.transform = '';
+  });
+}
+
 // ── Boot / auth ───────────────────────────────────────────────────────────────
 function boot() {
   const add = new URLSearchParams(location.search).get('add');
@@ -155,6 +195,7 @@ function boot() {
   window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); S.installEvt = e; if (S.tab === 'home') renderHome(); });
   document.addEventListener('visibilitychange', onVisible);
   setInterval(tick, 5000);
+  setupSheetSwipe();
   S.homeDrag = makeDraggable($('home-sheet'), () => [150, Math.round(vh() * 0.62), vh() - 76 - safeTop()],
     () => { if (S.follow && S.pos) centerOn(S.pos.lat, S.pos.lng); });
   S.detailDrag = makeDraggable($('detail-sheet'), () => {
@@ -1469,7 +1510,7 @@ async function carPickSheet() {
   openSheet(`<h3>Dein Auto</h3><p>Marke, Modell oder Motor eintippen. E-Autos sind nicht dabei – dafür „Manuell“ nutzen.</p>
     <div class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="car-q" placeholder="z. B. Golf TDI" autocomplete="off"></div>
     <div id="car-list"></div>
-    <p class="note">Dein Auto fehlt? Nimm ein ähnliches Modell mit gleichem Motor oder stell auf „Manuell“.</p>`);
+    <p class="note">Dein Auto fehlt? Nimm ein ähnliches Modell mit gleichem Motor oder stell auf „Manuell“.</p>`, null, true);
   renderCarList('');
 }
 
