@@ -459,7 +459,7 @@ function initMap() {
 function centerOn(lat, lng, zoom) {
   if (!S.map) return;
   const z = zoom || Math.max(S.map.getZoom(), 15);
-  const off = ($('home-sheet').offsetHeight || 0) / 2 - 30;
+  const off = (S.homeDrag?.visible() || 0) / 2 - 30;
   const p = S.map.project([lat, lng], z).add([0, off]);
   S.map.setView(S.map.unproject(p, z), z, { animate: true });
 }
@@ -815,82 +815,90 @@ async function leaveRide(id) {
 }
 
 // ── Draggable sheets ──────────────────────────────────────────────────────────
-// Drag the handle to resize a bottom sheet between snap heights; a tap toggles full/default.
+// Bottom sheet with fixed height that slides via transform (GPU-composited, no relayout while dragging).
+// Touch drags from anywhere: up expands until full, then content scrolls; down collapses once content is at top.
 function makeDraggable(sheet, snaps, onSnap) {
   const zone = sheet.querySelector('.grab-zone');
-  let startY = 0, startH = 0, lastY = 0, lastT = 0, vel = 0, moved = false;
-  const setH = (h, anim) => {
-    sheet.classList.toggle('anim', anim);
-    sheet.classList.add('sized');
-    sheet.style.height = h + 'px';
-    if (anim) setTimeout(() => onSnap?.(h), 300);
-  };
-  // Touch: drag from anywhere. Up expands until full, then content scrolls; down collapses once content is at the top.
   const body = sheet.querySelector('#home-body, .detail-body');
-  let mode = null, tStartY = 0, tH = 0, onZone = false;
-  sheet.addEventListener('touchstart', e => {
-    if (e.touches.length !== 1 || e.target.closest('.chart, input, select, textarea')) { mode = 'off'; return; }
-    mode = null; onZone = !!e.target.closest('.grab-zone');
-    tStartY = lastY = e.touches[0].clientY; lastT = e.timeStamp; vel = 0;
-    tH = sheet.offsetHeight;
-  }, { passive: true });
-  sheet.addEventListener('touchmove', e => {
-    if (mode === 'off' || mode === 'scroll') return;
-    const y = e.touches[0].clientY, dy = tStartY - y;
-    if (mode === null) {
-      if (Math.abs(dy) < 6) return;
-      const s = snaps();
-      const atMax = sheet.offsetHeight >= s[s.length - 1] - 2;
-      mode = onZone || (dy > 0 && !atMax) || (dy < 0 && body.scrollTop <= 0) ? 'drag' : 'scroll';
-      if (mode === 'scroll') return;
-      tStartY = y; tH = sheet.offsetHeight;
-    }
-    e.preventDefault();
+  let h = 0, maxH = 0, raf = 0, pending = null;
+  let mode = null, startY = 0, startH = 0, lastY = 0, lastT = 0, vel = 0, moved = false, onZone = false;
+
+  const apply = () => { raf = 0; if (pending != null) { sheet.style.transform = `translate3d(0,${maxH - pending}px,0)`; pending = null; } };
+  const setH = (nh, anim) => {
+    h = nh;
+    sheet.classList.toggle('anim', anim);
+    pending = nh;
+    if (anim) { cancelAnimationFrame(raf); apply(); setTimeout(() => onSnap?.(h), 300); }
+    else if (!raf) raf = requestAnimationFrame(apply);
+  };
+  const layout = () => {
     const s = snaps();
-    vel = (lastY - y) / Math.max(e.timeStamp - lastT, 1);
-    lastY = y; lastT = e.timeStamp;
-    setH(Math.min(Math.max(tH + tStartY - y, s[0] - 40), s[s.length - 1]), false);
-  }, { passive: false });
-  sheet.addEventListener('touchend', e => {
-    if (mode === 'drag') { moved = true; snapTo(); }
-    else if (mode === null && onZone) { moved = false; snapTo(); e.preventDefault(); }
-    mode = null;
-  });
+    maxH = s[s.length - 1];
+    sheet.style.height = maxH + 'px';
+    setH(h ? Math.min(Math.max(h, s[0]), maxH) : s[1], false);
+  };
   const snapTo = () => {
-    const s = snaps(), h = sheet.offsetHeight;
+    const s = snaps();
     let target;
     if (!moved) target = h >= s[s.length - 1] - 10 ? s[1] : s[s.length - 1];
-    else if (Math.abs(vel) > 0.5) target = vel > 0 ? s.find(x => x > h + 10) ?? s[s.length - 1] : [...s].reverse().find(x => x < h - 10) ?? s[0];
+    else if (Math.abs(vel) > 0.4) target = vel > 0 ? s.find(x => x > h + 10) ?? s[s.length - 1] : [...s].reverse().find(x => x < h - 10) ?? s[0];
     else target = s.reduce((x, y) => Math.abs(y - h) < Math.abs(x - h) ? y : x);
     setH(target, true);
   };
+  const begin = y => { startY = lastY = y; lastT = performance.now(); vel = 0; moved = false; startH = h; sheet.classList.remove('anim'); };
+  const drag = y => {
+    const s = snaps(), t = performance.now();
+    vel = (lastY - y) / Math.max(t - lastT, 1);
+    lastY = y; lastT = t;
+    setH(Math.min(Math.max(startH + startY - y, s[0] - 40), s[s.length - 1]), false);
+  };
+
+  sheet.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1 || e.target.closest('.chart, input, select, textarea')) { mode = 'off'; return; }
+    mode = null; onZone = !!e.target.closest('.grab-zone');
+    begin(e.touches[0].clientY);
+  }, { passive: true });
+  sheet.addEventListener('touchmove', e => {
+    if (mode === 'off' || mode === 'scroll') return;
+    const y = e.touches[0].clientY, dy = startY - y;
+    if (mode === null) {
+      if (Math.abs(dy) < 6) return;
+      const atMax = h >= maxH - 2;
+      mode = onZone || (dy > 0 && !atMax) || (dy < 0 && body.scrollTop <= 0) ? 'drag' : 'scroll';
+      if (mode === 'scroll') return;
+      begin(y);
+      moved = true;
+    }
+    e.preventDefault();
+    drag(y);
+  }, { passive: false });
+  sheet.addEventListener('touchend', e => {
+    if (mode === 'drag') snapTo();
+    else if (mode === null && onZone) { moved = false; snapTo(); e.preventDefault(); }
+    mode = null;
+  });
 
   // Mouse: drag via the handle
   zone.addEventListener('pointerdown', e => {
     if (e.pointerType === 'touch') return;
     zone.setPointerCapture(e.pointerId);
-    startY = lastY = e.clientY; lastT = e.timeStamp; vel = 0; moved = false;
-    startH = sheet.offsetHeight;
-    sheet.classList.remove('anim');
+    begin(e.clientY);
   });
   zone.addEventListener('pointermove', e => {
     if (!zone.hasPointerCapture(e.pointerId)) return;
     if (Math.abs(e.clientY - startY) > 4) moved = true;
-    if (!moved) return;
-    const s = snaps();
-    const h = Math.min(Math.max(startH + startY - e.clientY, s[0] - 40), s[s.length - 1]);
-    vel = (lastY - e.clientY) / Math.max(e.timeStamp - lastT, 1);
-    lastY = e.clientY; lastT = e.timeStamp;
-    setH(h, false);
+    if (moved) drag(e.clientY);
   });
-  const end = e => {
-    if (!zone.hasPointerCapture(e.pointerId)) return;
-    zone.releasePointerCapture(e.pointerId);
-    snapTo();
-  };
+  const end = e => { if (zone.hasPointerCapture(e.pointerId)) { zone.releasePointerCapture(e.pointerId); snapTo(); } };
   zone.addEventListener('pointerup', end);
   zone.addEventListener('pointercancel', end);
-  return { reset: () => { sheet.classList.remove('anim', 'sized'); sheet.style.height = ''; } };
+
+  window.addEventListener('resize', layout);
+  layout();
+  return {
+    reset: () => { const s = snaps(); h = 0; maxH = s[s.length - 1]; sheet.style.height = maxH + 'px'; setH(s[1], false); },
+    visible: () => h,
+  };
 }
 
 const vh = () => window.innerHeight;
@@ -1038,7 +1046,7 @@ async function openDetail(id, silent = false) {
 function fitDetail() {
   if (!S.dmap || !S.dline || !S.dline.getLatLngs().length) return;
   S.dmap.invalidateSize();
-  const covered = $('detail-sheet').offsetHeight;
+  const covered = S.detailDrag?.visible() || 0;
   S.dmap.fitBounds(S.dline.getBounds(), { paddingTopLeft: [30, 70], paddingBottomRight: [30, covered + 20], maxZoom: 16 });
 }
 
