@@ -340,3 +340,25 @@ sup { font-size: .6em; vertical-align: .45em; margin-left: 1px; }
   .page > * { max-width: 640px; margin-left: auto; margin-right: auto; }
 }
 .sheet .search { background: var(--s2); }
+
+/* ── Ride analysis ─────────────────────────────────────────────────────── */
+.chart { position: relative; height: 170px; background: var(--s1); border-radius: 14px; overflow: hidden; touch-action: none; cursor: crosshair; }
+.chart svg { display: block; width: 100%; height: 170px; stroke: none; }
+.chart .grid line { stroke: var(--s3); stroke-dasharray: 3 4; }
+.chart .grid text { fill: var(--mu); font: 600 10px 'Barlow', sans-serif; }
+.chart #chart-cur { stroke: var(--tx); stroke-width: 1.5; }
+.chart .ev-brake { fill: var(--red); stroke: var(--bg); stroke-width: 2; }
+.chart .ev-accel { fill: var(--amber); stroke: var(--bg); stroke-width: 2; }
+.chart-read { font-size: 14px; color: var(--mu); margin: 4px 0 8px; min-height: 20px; }
+.chart-read b { font-weight: 800; }
+.legend { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--mu); margin-top: 6px; }
+.legend i { flex: 1; height: 6px; border-radius: 3px; background: linear-gradient(90deg, rgb(92,225,230), rgb(200,240,60), rgb(255,210,94), rgb(255,138,91), rgb(255,77,109)); }
+.zone-bar { display: flex; height: 10px; border-radius: 5px; overflow: hidden; margin-bottom: 10px; background: var(--s3); }
+.zone-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; font-size: 14px; }
+.zone-row .dot { width: 10px; height: 10px; border-radius: 50%; }
+.style-card { display: flex; align-items: center; gap: 14px; }
+.style-card b { display: block; font-size: 16px; }
+.style-card small { color: var(--mu); font-size: 13px; }
+.score { width: 64px; height: 64px; border-radius: 50%; border: 4px solid var(--c); display: grid; place-content: center; text-align: center; flex-shrink: 0; }
+.score b { font: 800 24px/1 'Barlow Condensed', sans-serif; color: var(--c); }
+.score small { font-size: 10px; }

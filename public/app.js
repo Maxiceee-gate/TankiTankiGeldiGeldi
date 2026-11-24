@@ -14,7 +14,6 @@ const FUEL = {
 };
 const COLORS = ['#C8F03C', '#5CE1E6', '#FF8A5B', '#B69CFF', '#FFD25E', '#6EE7A8', '#FF6B9A', '#7AA7FF'];
 const TILES = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
-const ATTR = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const S = {
@@ -448,8 +447,8 @@ function rideRow(r) {
 // ── Map ───────────────────────────────────────────────────────────────────────
 function initMap() {
   if (S.map || !window.L) return;
-  S.map = L.map('map', { zoomControl: false, attributionControl: true }).setView([51.16, 10.45], 6);
-  L.tileLayer(TILES, { attribution: ATTR, maxZoom: 19 }).addTo(S.map);
+  S.map = L.map('map', { zoomControl: false, attributionControl: false }).setView([51.16, 10.45], 6);
+  L.tileLayer(TILES, { maxZoom: 19 }).addTo(S.map);
   S.map.on('dragstart', () => { S.follow = false; });
 }
 
@@ -811,14 +810,135 @@ async function leaveRide(id) {
   if (S.detail?.ride.id === id) openDetail(id, true);
 }
 
+// ── Ride analysis ─────────────────────────────────────────────────────────────
+const SPEED_STOPS = [[0, [92, 225, 230]], [40, [200, 240, 60]], [80, [255, 210, 94]], [120, [255, 138, 91]], [160, [255, 77, 109]]];
+function speedColor(v) {
+  for (let i = 1; i < SPEED_STOPS.length; i++) {
+    const [v1, c1] = SPEED_STOPS[i];
+    if (v <= v1 || i === SPEED_STOPS.length - 1) {
+      const [v0, c0] = SPEED_STOPS[i - 1];
+      const k = Math.min(Math.max((v - v0) / (v1 - v0), 0), 1);
+      return `rgb(${c0.map((c, j) => Math.round(c + (c1[j] - c) * k)).join(',')})`;
+    }
+  }
+}
+
+function analyze(track) {
+  const smp = [];
+  let km = 0;
+  for (let i = 0; i < track.length; i++) {
+    const [lat, lng, sp, ts] = track[i];
+    let v = sp;
+    if (i > 0) {
+      const [pl, pg, , pt] = track[i - 1];
+      const d = meters({ lat: pl, lng: pg }, { lat, lng }) / 1000;
+      km += d;
+      if (!(sp > 0)) v = ts > pt ? d / ((ts - pt) / 3600) : 0;
+    }
+    smp.push({ lat, lng, km, t: ts, v: Math.min(v || 0, 250) });
+  }
+  for (let i = 1; i < smp.length - 1; i++) smp[i].vs = (smp[i - 1].v + smp[i].v + smp[i + 1].v) / 3;
+  smp.forEach(p => { p.v = Math.round(p.vs ?? p.v); delete p.vs; });
+
+  let standing = 0, moving = 0, movingKm = 0, max = 0, lastB = -1e9, lastA = -1e9;
+  const events = [];
+  for (let i = 1; i < smp.length; i++) {
+    const a = smp[i - 1], b = smp[i], dt = b.t - a.t;
+    if (dt <= 0) continue;
+    // Standing still stores no points, so a stop shows up as a time gap between two points
+    const segKm = b.km - a.km, segV = segKm / (dt / 3600);
+    const driveSecs = segV < 3 ? 0 : Math.min(dt, segKm / (Math.max((a.v + b.v) / 2, 5) / 3600));
+    standing += dt - driveSecs; moving += driveSecs; movingKm += driveSecs ? segKm : 0;
+    max = Math.max(max, b.v);
+    if (dt > 8) continue;
+    const acc = (b.v - a.v) / 3.6 / dt;
+    if (acc < -3.0 && b.t - lastB > 6) { events.push({ type: 'brake', ...b, acc }); lastB = b.t; }
+    if (acc > 2.8 && b.t - lastA > 6) { events.push({ type: 'accel', ...b, acc }); lastA = b.t; }
+  }
+  const total = smp.length ? smp[smp.length - 1].km : 0;
+  const brakes = events.filter(e => e.type === 'brake').length;
+  const accels = events.length - brakes;
+  const per10 = Math.max(total / 10, 0.5);
+  const score = Math.round(Math.max(0, Math.min(100, 100 - (brakes * 8 + accels * 5) / per10 - Math.max(0, max - 160) * 0.3)));
+  return { smp, total, max, standing, moving, avgMoving: moving > 0 ? movingKm / (moving / 3600) : 0, events, brakes, accels, score };
+}
+
+function styleLabel(score) {
+  return score >= 85 ? 'Sehr entspannt' : score >= 70 ? 'Entspannt' : score >= 50 ? 'Sportlich' : 'Wild';
+}
+
+function statsHtml(an, zones) {
+  const zl = { stadt: 'Stadt', land: 'Land', autobahn: 'Autobahn' };
+  const zc = { stadt: speedColor(25), land: speedColor(75), autobahn: speedColor(125) };
+  const zKm = Object.values(zones || {}).reduce((s, z) => s + z.km, 0) || 1;
+  let h = `<div class="section"><div class="section-h"><span>Auswertung</span></div>
+    <div class="chart-read" id="chart-read">Finger über den Graph ziehen</div>
+    <div class="chart" id="chart"></div>
+    <div class="legend"><span>0</span><i></i><span>160+ km/h</span></div>
+    <div class="stats" style="margin-top:12px">
+      <div class="stat"><b>${Math.round(an.max)}<small>km/h</small></b><span>Max</span></div>
+      <div class="stat"><b>${Math.round(an.avgMoving)}<small>km/h</small></b><span>Ø fahrend</span></div>
+      <div class="stat"><b>${an.standing < 60 ? Math.round(an.standing) : durShort(an.standing)}<small>${an.standing < 60 ? 's' : an.standing >= 3600 ? 'h' : 'min'}</small></b><span>Standzeit</span></div>
+    </div>`;
+  if (zones) {
+    h += `<div class="cost-card"><div class="zone-bar">${Object.keys(zl).map(k => `<i style="width:${zones[k].km / zKm * 100}%;background:${zc[k]}"></i>`).join('')}</div>
+      ${Object.keys(zl).map(k => `<div class="zone-row"><span class="dot" style="background:${zc[k]}"></span><b>${zl[k]}</b><span class="grow mu">${kmNum(zones[k].km)} km · ${dur(zones[k].s)}</span><span>${dec(zones[k].l)} l${zones[k].km > 0.3 ? ` <small class="mu">(${dec(zones[k].l / zones[k].km * 100)}/100)</small>` : ''}</span></div>`).join('')}
+    </div>`;
+  }
+  h += `<div class="cost-card style-card"><div class="score" style="--c:${an.score >= 70 ? 'var(--ac)' : an.score >= 50 ? 'var(--amber)' : 'var(--red)'}"><b>${an.score}</b><small>/100</small></div>
+    <div class="grow"><b>${styleLabel(an.score)}</b><small>${an.brakes} starke Bremsungen · ${an.accels} starke Beschleunigungen${an.events.length ? ' – auf der Karte markiert' : ''}</small></div></div>`;
+  return h + '</div>';
+}
+
+function drawChart() {
+  const el = $('chart');
+  const an = S.detail?.an;
+  if (!el || !an) return;
+  const W = el.clientWidth, H = 170, smp = an.smp;
+  const vmax = Math.max(60, Math.ceil(an.max / 50) * 50);
+  const step = Math.max(1, Math.floor(smp.length / 400));
+  const pts = smp.filter((_, i) => i % step === 0 || i === smp.length - 1);
+  const x = km => an.total ? km / an.total * W : 0, y = v => H - v / vmax * (H - 8);
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${x(p.km).toFixed(1)},${y(p.v).toFixed(1)}`).join('');
+  const grid = [];
+  for (let v = 50; v < vmax; v += 50) grid.push(`<line x1="0" x2="${W}" y1="${y(v)}" y2="${y(v)}"/><text x="${W - 4}" y="${y(v) - 4}" text-anchor="end">${v}</text>`);
+  el.innerHTML = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">
+    <defs><linearGradient id="cg" x1="0" x2="${W}" y1="0" y2="0" gradientUnits="userSpaceOnUse">${pts.filter((_, i) => i % 8 === 0).map(p => `<stop offset="${(x(p.km) / W).toFixed(3)}" stop-color="${speedColor(p.v)}"/>`).join('')}</linearGradient></defs>
+    <g class="grid">${grid.join('')}</g>
+    <path d="${line}L${W},${H}L0,${H}Z" fill="url(#cg)" opacity=".18"/>
+    <path d="${line}" fill="none" stroke="url(#cg)" stroke-width="2.5" stroke-linejoin="round"/>
+    ${an.events.map(e => `<circle cx="${x(e.km)}" cy="${y(e.v)}" r="4" class="ev-${e.type}"/>`).join('')}
+    <line id="chart-cur" y1="0" y2="${H}" x1="-10" x2="-10"/>
+  </svg>`;
+  const move = e => {
+    const r = el.getBoundingClientRect();
+    const km = Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1) * an.total;
+    let lo = 0, hi = smp.length - 1;
+    while (lo < hi) { const mid = (lo + hi) >> 1; if (smp[mid].km < km) lo = mid + 1; else hi = mid; }
+    const p = smp[lo];
+    const cur = $('chart-cur');
+    cur.setAttribute('x1', x(p.km)); cur.setAttribute('x2', x(p.km));
+    $('chart-read').innerHTML = `<b style="color:${speedColor(p.v)}">${p.v} km/h</b> · km ${kmNum(p.km)} · ${timeStr(p.t)}`;
+    if (S.dmap) {
+      if (!S.dcur) S.dcur = L.circleMarker([p.lat, p.lng], { radius: 8, color: '#0B0C0A', weight: 3, fillColor: '#F3F5EF', fillOpacity: 1 });
+      S.dcur.setLatLng([p.lat, p.lng]).addTo(S.dlayer);
+    }
+  };
+  el.onpointerdown = e => { el.setPointerCapture(e.pointerId); move(e); };
+  el.onpointermove = e => { if (e.buttons || e.pointerType === 'mouse') move(e); };
+}
+
 // ── Ride detail ───────────────────────────────────────────────────────────────
 async function openDetail(id, silent = false) {
   const d = await api('GET', `/api/rides/${id}`);
   if (d.error) { if (!silent) toast(d.error, 'err'); return; }
+  d.an = d.track && d.track.length >= 5 && d.ride.status === 'ended' ? analyze(d.track) : null;
   S.detail = d;
+  S.dcur = null;
   $('detail').hidden = false;
   renderDetail();
   drawDetailMap();
+  drawChart();
 }
 
 function closeDetail() {
@@ -830,15 +950,30 @@ function closeDetail() {
 function drawDetailMap() {
   if (!window.L) return;
   if (!S.dmap) {
-    S.dmap = L.map('detail-map', { zoomControl: false, attributionControl: true });
-    L.tileLayer(TILES, { attribution: ATTR, maxZoom: 19 }).addTo(S.dmap);
+    S.dmap = L.map('detail-map', { zoomControl: false, attributionControl: false, preferCanvas: true });
+    L.tileLayer(TILES, { maxZoom: 19 }).addTo(S.dmap);
     S.dlayer = L.layerGroup().addTo(S.dmap);
   }
   S.dmap.invalidateSize();
   S.dlayer.clearLayers();
   const { points, ride } = S.detail;
+  const an = S.detail.an;
+  if (an) {
+    let run = [an.smp[0]], bucket = Math.round(an.smp[0].v / 10);
+    const flush = () => { if (run.length > 1) L.polyline(run.map(p => [p.lat, p.lng]), { color: speedColor(bucket * 10), weight: 6, opacity: 1, interactive: false }).addTo(S.dlayer); };
+    for (let i = 1; i < an.smp.length; i++) {
+      const p = an.smp[i], b = Math.round(p.v / 10);
+      run.push(p);
+      if (b !== bucket) { flush(); run = [p]; bucket = b; }
+    }
+    flush();
+    for (const e of an.events) {
+      L.circleMarker([e.lat, e.lng], { radius: 6, weight: 2, color: '#0B0C0A', fillColor: e.type === 'brake' ? '#FF6B57' : '#FFC24B', fillOpacity: 1 })
+        .bindTooltip(`${e.type === 'brake' ? 'Starke Bremsung' : 'Starke Beschleunigung'} · ${e.v} km/h`).addTo(S.dlayer);
+    }
+  }
   if (points.length) {
-    S.dline = L.polyline(points, { color: '#C8F03C', weight: 5, opacity: .95 }).addTo(S.dlayer);
+    S.dline = L.polyline(points, { color: '#C8F03C', weight: 5, opacity: an ? 0 : .95, interactive: false }).addTo(S.dlayer);
     L.marker(points[0], { icon: L.divIcon({ className: '', html: '<div class="pin-start"></div>', iconSize: [14, 14] }), interactive: false }).addTo(S.dlayer);
     if (ride.status === 'ended') {
       L.marker(points[points.length - 1], { icon: L.divIcon({ className: '', html: '<div class="pin-end"></div>', iconSize: [14, 14] }), interactive: false }).addTo(S.dlayer);
@@ -877,6 +1012,7 @@ function renderDetail() {
     ${calc.totalCost == null && !driver ? `<p class="note">${esc(r.driver.username)} muss noch den Spritpreis eintragen.</p>` : ''}
   </div>`;
 
+  if (S.detail.an) h += statsHtml(S.detail.an, S.detail.zones);
   h += `<div class="section"><div class="section-h"><span>Im Auto</span><span>Anteil</span></div>
     <div class="row">${av(r.driver, 40)}<div class="grow"><b>${driver ? 'Du' : esc(r.driver.username)}</b><small>Fahrer · zahlt seinen Anteil selbst</small></div>
       <div class="amount">${calc.driverShare != null ? eur(calc.driverShare) : '–'}</div></div>`;

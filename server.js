@@ -58,6 +58,27 @@ function fuelProfile(ride) {
   return km > 0 ? prof.map(([k, l]) => [k * total / km, l]) : null;
 }
 
+// Distance, time and fuel split into city (<50 km/h), rural (50–100) and motorway (>100) from ~500 m chunks
+function rideZones(ride, pts) {
+  const car = CAR_BY_ID.get(ride.car_id);
+  const zones = { stadt: { km: 0, s: 0, l: 0 }, land: { km: 0, s: 0, l: 0 }, autobahn: { km: 0, s: 0, l: 0 } };
+  let chunkKm = 0, t0 = pts[0]?.[3];
+  for (let i = 1; i < pts.length; i++) {
+    chunkKm += haversine(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]);
+    if (chunkKm >= 0.5 || i === pts.length - 1) {
+      const secs = Math.max(pts[i][3] - t0, 1);
+      const v = chunkKm / (secs / 3600);
+      const z = zones[v < 50 ? 'stadt' : v <= 100 ? 'land' : 'autobahn'];
+      z.km += chunkKm;
+      z.s += secs;
+      z.l += chunkKm * (car ? consAt(car, Math.min(Math.max(v, 3), 220)) : ride.consumption || 7.5) / 100;
+      chunkKm = 0;
+      t0 = pts[i][3];
+    }
+  }
+  return zones;
+}
+
 function litersAt(prof, x) {
   for (let i = 1; i < prof.length; i++) {
     if (x <= prof[i][0]) {
@@ -477,10 +498,15 @@ route('GET', '/api/rides/:id', true, ({ user, params }) => {
   const pay = mine ? payInfo(q.userById.get(ride.driver_id)) : null;
   const points = db.prepare('SELECT lat, lng FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id).map(p => [p.lat, p.lng]);
   const card = rideCard(ride, user.id, parts);
+  let track = null, zones = null;
+  if (ride.driver_id === user.id || mine) {
+    track = db.prepare('SELECT lat, lng, speed, ts FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id).map(p => [p.lat, p.lng, p.speed, p.ts]);
+    zones = track.length > 1 ? rideZones(ride, track) : null;
+  }
   card.participants.forEach(p => { p.live_share = calc.shares[p.id]; });
   return {
     ride: card, points, joinable: ride.status === 'active' || ride.ended_at > now() - JOIN_WINDOW,
-    calc: { perKm: calc.perKm, totalCost: calc.totalCost, driverShare: calc.driverShare, effConsumption: calc.effConsumption }, pay,
+    calc: { perKm: calc.perKm, totalCost: calc.totalCost, driverShare: calc.driverShare, effConsumption: calc.effConsumption }, pay, track, zones,
   };
 });
 
