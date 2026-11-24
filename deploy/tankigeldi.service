@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-User=www-data
-WorkingDirectory=/var/www/tankigeldi
-ExecStart=/usr/bin/node server.js
+User=root
+WorkingDirectory=/root/tankigeldi
+ExecStart=/usr/local/bin/node server.js
 Restart=on-failure
 RestartSec=5
 Environment=NODE_ENV=production

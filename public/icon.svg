@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <rect width="512" height="512" fill="#0B0C0A"/>
+  <path d="M256 92C256 92 136 236 136 318a120 120 0 0 0 240 0C376 236 256 92 256 92Z" fill="#C8F03C"/>
+  <text x="256" y="372" text-anchor="middle" font-family="Arial Black, Arial, sans-serif" font-weight="900" font-size="150" fill="#0B0C0A">€</text>
+</svg>
