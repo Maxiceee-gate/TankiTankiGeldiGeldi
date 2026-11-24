@@ -790,6 +790,7 @@ route('GET', '/api/users/:id/stats', true, ({ user, params }) => {
   const buddyUser = buddy ? q.userById.get(buddy.other) : null;
   return {
     user: { ...pub(u), role: u.role, since: u.created_at, car: carLabel(CAR_BY_ID.get(u.car_id)) || u.car_name || null },
+    pay: self ? null : payInfo(u), // TEMP: exposed to friends for the test-payment button
     driven, ridden, carried, topSpeed, days, hours,
     buddy: buddyUser ? { ...pub(buddyUser), count: buddy.c } : null,
     together,

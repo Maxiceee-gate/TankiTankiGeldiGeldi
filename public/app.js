@@ -1540,6 +1540,7 @@ async function openUser(id) {
   $('user-body').innerHTML = '<div class="empty">Lädt …</div>';
   const st = await api('GET', `/api/users/${id}/stats`);
   if (st.error) { $('user-body').innerHTML = `<div class="empty">${esc(st.error)}</div>`; return; }
+  S.userStats = st;
   $('user-body').innerHTML = statsPage(st);
 }
 
@@ -1570,6 +1571,7 @@ function statsPage(st) {
       <span class="mu">${u.role === 'driver' ? 'Fahrer' : 'Mitfahrer'} · dabei seit ${since}</span>
       ${u.car ? `<div class="mu" style="font-size:13px;margin-top:2px">${ICON.car.replace('<svg', '<svg style="width:14px;height:14px;vertical-align:-2px"')} ${esc(u.car)}</div>` : ''}</div></div>`;
 
+  if (!self) html += `<button class="btn ghost" style="margin-top:12px" data-act="test-pay">Testzahlung an ${esc(u.username)}</button>`;
   if (st.together) {
     const t = st.together;
     html += `<div class="card"><div class="card-h">${self ? '' : 'Ihr zusammen'}</div><div style="height:10px"></div>
@@ -1688,7 +1690,18 @@ const ACT = {
     const { ride, pay } = S.detail;
     paySheet(ride.driver, pay, ride.my_part.share_eur, [ride.my_part.id]);
   },
+  'test-pay': () => {
+    openSheet(`<h3>Testzahlung</h3><p>Nur zum Ausprobieren: Betrag eingeben und den Bezahl-Dialog testen. Es wird nichts verbucht.</p>
+      <label class="field"><span>Betrag</span><div class="unit-input"><input id="test-amount" inputmode="decimal" placeholder="1,00"><em>€</em></div></label>
+      <div style="height:14px"></div><button class="btn" data-act="test-pay-go">Weiter</button>`);
+  },
+  'test-pay-go': () => {
+    const v = +String($('test-amount').value).replace(',', '.');
+    if (!(v > 0)) return toast('Bitte einen Betrag eingeben', 'err');
+    paySheet(S.userStats.user, S.userStats.pay, Math.round(v * 100) / 100, []);
+  },
   'pay-done': async () => {
+    if (!S.payPids?.length) { closeSheet(); return toast('Test beendet – es wurde nichts verbucht'); }
     for (const pid of S.payPids || []) {
       const r = await call('POST', `/api/participants/${pid}/paid`, { paid: true });
       if (r.error) return;
