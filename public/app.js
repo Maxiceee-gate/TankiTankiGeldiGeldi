@@ -157,7 +157,11 @@ function boot() {
   setInterval(tick, 5000);
   S.homeDrag = makeDraggable($('home-sheet'), () => [150, Math.round(vh() * 0.62), vh() - 76 - safeTop()],
     () => { if (S.follow && S.pos) centerOn(S.pos.lat, S.pos.lng); });
-  S.detailDrag = makeDraggable($('detail-sheet'), () => [Math.round(vh() * 0.28), Math.round(vh() * 0.58) + 24, vh() - 64 - safeTop()],
+  S.detailDrag = makeDraggable($('detail-sheet'), () => {
+    const t = document.querySelector('#detail-body .d-title');
+    const head = (t ? t.offsetTop + t.offsetHeight + 14 : 110) + safeInset('bottom');
+    return [head, Math.round(vh() * 0.58) + 24, vh() - 64 - safeTop()];
+  },
     () => fitDetail());
   setInterval(() => { if (!document.hidden && S.me) loadFeed(); }, 20000);
   if (S.token) start(); else showAuth();
@@ -902,9 +906,10 @@ function makeDraggable(sheet, snaps, onSnap) {
 }
 
 const vh = () => window.innerHeight;
-function safeTop() {
+const safeTop = () => safeInset('top');
+function safeInset(side) {
   const d = document.createElement('div');
-  d.style.cssText = 'position:fixed;visibility:hidden;height:env(safe-area-inset-top,0px)';
+  d.style.cssText = `position:fixed;visibility:hidden;height:env(safe-area-inset-${side},0px)`;
   document.body.appendChild(d);
   const h = d.offsetHeight;
   d.remove();
@@ -1106,7 +1111,7 @@ function renderDetail() {
   const live = r.status === 'active';
 
   let h = `<div class="d-date">${dateStr(r.started_at)} · ${timeStr(r.started_at)}${r.ended_at ? '–' + timeStr(r.ended_at) : ' · live'}</div>
-    <div class="d-title">${driver ? 'Deine Fahrt' : `Fahrt mit ${esc(r.driver.username)}`}</div>
+    <div class="d-title">${r.name ? esc(r.name) : driver ? 'Deine Fahrt' : `Fahrt mit ${esc(r.driver.username)}`}${driver || mine ? `<button class="x-btn rename" data-act="rename" aria-label="Umbenennen">${ICON.pen}</button>` : ''}</div>
     <div class="stats">
       <div class="stat"><b>${kmNum(r.total_distance)}<small>km</small></b><span>Strecke</span></div>
       <div class="stat"><b>${durShort(secs)}<small>${secs >= 3600 ? 'h' : 'min'}</small></b><span>Dauer</span></div>
@@ -1236,8 +1241,8 @@ async function loadHistory() {
     }
     h += `<div class="row tap" data-act="ride" data-id="${ride.id}">
       ${av(driver ? S.me : ride.driver, 44)}
-      <div class="grow"><b class="ell">${driver ? (others.length ? `Du + ${others.map(p => esc(p.username)).join(', ')}` : 'Du allein') : `Mit ${esc(ride.driver.username)}`}</b>
-      <small>${dateStr(ride.started_at)}, ${timeStr(ride.started_at)} · ${kmNum(ride.total_distance)} km</small></div>${right}</div>`;
+      <div class="grow"><b class="ell">${ride.name ? esc(ride.name) : driver ? (others.length ? `Du + ${others.map(p => esc(p.username)).join(', ')}` : 'Du allein') : `Mit ${esc(ride.driver.username)}`}</b>
+      <small>${dateStr(ride.started_at)}, ${timeStr(ride.started_at)} · ${kmNum(ride.total_distance)} km${ride.name ? ` · ${driver ? (others.length ? `mit ${others.map(p => esc(p.username)).join(', ')}` : 'allein') : `mit ${esc(ride.driver.username)}`}` : ''}</small></div>${right}</div>`;
   }
   body.innerHTML = h + '</div>';
 }
@@ -1503,6 +1508,21 @@ const ACT = {
   ride: el => openDetail(+el.dataset.id),
   'detail-close': () => closeDetail(),
   'edit-price': () => editPriceSheet(),
+  rename: () => {
+    const r = S.detail.ride;
+    openSheet(`<h3>Fahrt benennen</h3><p>Den Namen sehen alle, die bei der Fahrt dabei waren.</p>
+      <label class="field"><input id="ride-name" maxlength="50" placeholder="z. B. Ausflug Bodensee" value="${esc(r.name || '')}"></label>
+      <div style="height:14px"></div><button class="btn" data-act="save-name">Speichern</button>`);
+    setTimeout(() => $('ride-name')?.focus(), 50);
+  },
+  'save-name': async () => {
+    const id = S.detail.ride.id;
+    const r = await call('POST', `/api/rides/${id}/name`, { name: $('ride-name').value });
+    if (r.error) return;
+    closeSheet();
+    openDetail(id, true);
+    if (S.tab === 'rides') loadHistory();
+  },
   'save-price': () => savePrice(),
   'add-part': el => addPartSheet(+el.dataset.id),
   'add-friend-part': async el => {

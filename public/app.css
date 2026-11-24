@@ -369,3 +369,5 @@ sup { font-size: .6em; vertical-align: .45em; margin-left: 1px; }
 .score { width: 64px; height: 64px; border-radius: 50%; border: 4px solid var(--c); display: grid; place-content: center; text-align: center; flex-shrink: 0; }
 .score b { font: 800 24px/1 'Barlow Condensed', sans-serif; color: var(--c); }
 .score small { font-size: 10px; }
+.d-title { display: flex; align-items: center; gap: 8px; }
+.d-title .rename { flex-shrink: 0; background: var(--s2); }

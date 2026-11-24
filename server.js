@@ -163,7 +163,7 @@ ensureCols('users', {
 });
 ensureCols('rides', {
   consumption: 'REAL', last_lat: 'REAL', last_lng: 'REAL', last_speed: 'REAL',
-  last_ts: 'INTEGER', last_seen: 'INTEGER', auto_started: 'INTEGER DEFAULT 0', car_id: 'TEXT',
+  last_ts: 'INTEGER', last_seen: 'INTEGER', auto_started: 'INTEGER DEFAULT 0', car_id: 'TEXT', name: 'TEXT',
 });
 ensureCols('ride_participants', {
   from_km: 'REAL DEFAULT 0', to_km: 'REAL', share_eur: 'REAL', paid_at: 'INTEGER', paid_by: 'INTEGER',
@@ -258,7 +258,7 @@ function partJson(p) {
 function rideCard(r, meId, parts = q.parts.all(r.id)) {
   const mine = parts.find(p => p.user_id === meId);
   return {
-    id: r.id, status: r.status, started_at: r.started_at, ended_at: r.ended_at,
+    id: r.id, name: r.name, status: r.status, started_at: r.started_at, ended_at: r.ended_at,
     total_distance: r.total_distance || 0, fuel_type: r.fuel_type, fuel_price: r.fuel_price,
     consumption: r.consumption, auto_started: !!r.auto_started, car: carLabel(CAR_BY_ID.get(r.car_id)) || null,
     last_lat: r.last_lat, last_lng: r.last_lng, last_speed: r.last_speed, last_seen: r.last_seen,
@@ -564,6 +564,14 @@ route('PUT', '/api/rides/:id', true, ({ user, params, body }) => {
   const keys = Object.keys(u);
   if (keys.length) db.prepare(`UPDATE rides SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => u[k]), ride.id);
   settle(ride.id);
+  send(audience(ride), { type: 'ride_updated', rideId: ride.id }, user.id);
+});
+
+route('POST', '/api/rides/:id/name', true, ({ user, params, body }) => {
+  const ride = q.ride.get(params.id) || fail(404, 'Fahrt nicht gefunden.');
+  if (ride.driver_id !== user.id && !q.part.get(ride.id, user.id)) fail(403, 'Nur Leute aus der Fahrt können sie umbenennen.');
+  const name = String(body.name || '').trim().slice(0, 50) || null;
+  db.prepare('UPDATE rides SET name = ? WHERE id = ?').run(name, ride.id);
   send(audience(ride), { type: 'ride_updated', rideId: ride.id }, user.id);
 });
 
