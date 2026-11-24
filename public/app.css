@@ -190,11 +190,15 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 
 .home-sheet {
   position: absolute; z-index: 500; left: 0; right: 0; bottom: 0; max-height: 66%;
-  overflow-y: auto; -webkit-overflow-scrolling: touch;
+  display: flex; flex-direction: column; overflow: hidden;
   background: var(--s1); border-radius: 24px 24px 0 0; box-shadow: 0 -10px 40px rgba(0, 0, 0, .5);
-  padding: 6px max(16px, var(--sr)) 16px max(16px, var(--sl));
 }
+.home-sheet.sized { max-height: none; }
+#home-body { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 0 max(16px, var(--sr)) 16px max(16px, var(--sl)); }
 .grab { width: 40px; height: 5px; border-radius: 3px; background: var(--s3); margin: 4px auto 12px; }
+.grab-zone { flex-shrink: 0; padding: 8px 0 2px; touch-action: none; cursor: grab; }
+.grab-zone .grab { margin: 0 auto 8px; width: 44px; }
+.anim { transition: height .28s cubic-bezier(.2, .9, .3, 1); }
 
 .me-dot { width: 20px; height: 20px; border-radius: 50%; background: var(--ac); border: 3px solid var(--bg); box-shadow: 0 0 0 0 rgba(200, 240, 60, .6); animation: pulse 2s infinite; }
 .car-pin { position: relative; }
@@ -254,11 +258,13 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .alert .grow small { display: block; font-weight: 500; opacity: .8; }
 
 /* ── Detail ────────────────────────────────────────────────────────────── */
-#detail-map { bottom: auto; height: 42vh; }
+.detail-sheet {
+  position: absolute; left: 0; right: 0; bottom: 0; height: calc(58vh + 24px); z-index: 500;
+  display: flex; flex-direction: column; background: var(--bg); border-radius: 24px 24px 0 0; box-shadow: 0 -10px 40px rgba(0, 0, 0, .5);
+}
 .detail-body {
-  position: absolute; left: 0; right: 0; bottom: 0; top: calc(42vh - 24px); overflow-y: auto; -webkit-overflow-scrolling: touch;
-  background: var(--bg); border-radius: 24px 24px 0 0; z-index: 500;
-  padding: 20px max(16px, var(--sr)) calc(var(--sb) + 28px) max(16px, var(--sl));
+  flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch;
+  padding: 4px max(16px, var(--sr)) calc(var(--sb) + 28px) max(16px, var(--sl));
 }
 .d-date { font-size: 13px; color: var(--mu); font-weight: 600; text-transform: uppercase; letter-spacing: .08em; }
 .d-title { font-size: 30px; font-weight: 800; text-transform: uppercase; line-height: 1.05; margin: 4px 0 16px; }
@@ -335,7 +341,7 @@ sup { font-size: .6em; vertical-align: .45em; margin-left: 1px; }
 @keyframes drop { from { transform: translateY(-20px); opacity: 0; } }
 
 @media (min-width: 720px) {
-  .home-sheet, .sheet, .detail-body { max-width: 520px; left: 50%; transform: translateX(-50%); }
+  .home-sheet, .sheet, .detail-sheet { max-width: 520px; left: 50%; transform: translateX(-50%); }
   .sheet { margin: 0 auto; transform: none; }
   .page > * { max-width: 640px; margin-left: auto; margin-right: auto; }
 }

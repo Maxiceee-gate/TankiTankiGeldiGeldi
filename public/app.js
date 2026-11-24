@@ -155,6 +155,10 @@ function boot() {
   window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); S.installEvt = e; if (S.tab === 'home') renderHome(); });
   document.addEventListener('visibilitychange', onVisible);
   setInterval(tick, 5000);
+  S.homeDrag = makeDraggable($('home-sheet'), () => [150, Math.round(vh() * 0.62), vh() - 76 - safeTop()],
+    () => { if (S.follow && S.pos) centerOn(S.pos.lat, S.pos.lng); });
+  S.detailDrag = makeDraggable($('detail-sheet'), () => [Math.round(vh() * 0.28), Math.round(vh() * 0.58) + 24, vh() - 64 - safeTop()],
+    () => fitDetail());
   setInterval(() => { if (!document.hidden && S.me) loadFeed(); }, 20000);
   if (S.token) start(); else showAuth();
 }
@@ -810,6 +814,58 @@ async function leaveRide(id) {
   if (S.detail?.ride.id === id) openDetail(id, true);
 }
 
+// ── Draggable sheets ──────────────────────────────────────────────────────────
+// Drag the handle to resize a bottom sheet between snap heights; a tap toggles full/default.
+function makeDraggable(sheet, snaps, onSnap) {
+  const zone = sheet.querySelector('.grab-zone');
+  let startY = 0, startH = 0, lastY = 0, lastT = 0, vel = 0, moved = false;
+  const setH = (h, anim) => {
+    sheet.classList.toggle('anim', anim);
+    sheet.classList.add('sized');
+    sheet.style.height = h + 'px';
+    if (anim) setTimeout(() => onSnap?.(h), 300);
+  };
+  zone.addEventListener('pointerdown', e => {
+    zone.setPointerCapture(e.pointerId);
+    startY = lastY = e.clientY; lastT = e.timeStamp; vel = 0; moved = false;
+    startH = sheet.offsetHeight;
+    sheet.classList.remove('anim');
+  });
+  zone.addEventListener('pointermove', e => {
+    if (!zone.hasPointerCapture(e.pointerId)) return;
+    if (Math.abs(e.clientY - startY) > 4) moved = true;
+    if (!moved) return;
+    const s = snaps();
+    const h = Math.min(Math.max(startH + startY - e.clientY, s[0] - 40), s[s.length - 1]);
+    vel = (lastY - e.clientY) / Math.max(e.timeStamp - lastT, 1);
+    lastY = e.clientY; lastT = e.timeStamp;
+    setH(h, false);
+  });
+  const end = e => {
+    if (!zone.hasPointerCapture(e.pointerId)) return;
+    zone.releasePointerCapture(e.pointerId);
+    const s = snaps(), h = sheet.offsetHeight;
+    let target;
+    if (!moved) target = h >= s[s.length - 1] - 10 ? s[1] : s[s.length - 1];
+    else if (Math.abs(vel) > 0.5) target = vel > 0 ? s.find(x => x > h + 10) ?? s[s.length - 1] : [...s].reverse().find(x => x < h - 10) ?? s[0];
+    else target = s.reduce((a, b) => Math.abs(b - h) < Math.abs(a - h) ? b : a);
+    setH(target, true);
+  };
+  zone.addEventListener('pointerup', end);
+  zone.addEventListener('pointercancel', end);
+  return { reset: () => { sheet.classList.remove('anim', 'sized'); sheet.style.height = ''; } };
+}
+
+const vh = () => window.innerHeight;
+function safeTop() {
+  const d = document.createElement('div');
+  d.style.cssText = 'position:fixed;visibility:hidden;height:env(safe-area-inset-top,0px)';
+  document.body.appendChild(d);
+  const h = d.offsetHeight;
+  d.remove();
+  return h;
+}
+
 // ── Ride analysis ─────────────────────────────────────────────────────────────
 const SPEED_STOPS = [[0, [92, 225, 230]], [40, [200, 240, 60]], [80, [255, 210, 94]], [120, [255, 138, 91]], [160, [255, 77, 109]]];
 function speedColor(v) {
@@ -932,6 +988,7 @@ function drawChart() {
 async function openDetail(id, silent = false) {
   const d = await api('GET', `/api/rides/${id}`);
   if (d.error) { if (!silent) toast(d.error, 'err'); return; }
+  if (!silent || S.detail?.ride.id !== id) S.detailDrag?.reset();
   d.an = d.track && d.track.length >= 5 && d.ride.status === 'ended' ? analyze(d.track) : null;
   S.detail = d;
   S.dcur = null;
@@ -939,6 +996,13 @@ async function openDetail(id, silent = false) {
   renderDetail();
   drawDetailMap();
   drawChart();
+}
+
+function fitDetail() {
+  if (!S.dmap || !S.dline || !S.dline.getLatLngs().length) return;
+  S.dmap.invalidateSize();
+  const covered = $('detail-sheet').offsetHeight;
+  S.dmap.fitBounds(S.dline.getBounds(), { paddingTopLeft: [30, 70], paddingBottomRight: [30, covered + 20], maxZoom: 16 });
 }
 
 function closeDetail() {
@@ -978,7 +1042,7 @@ function drawDetailMap() {
     if (ride.status === 'ended') {
       L.marker(points[points.length - 1], { icon: L.divIcon({ className: '', html: '<div class="pin-end"></div>', iconSize: [14, 14] }), interactive: false }).addTo(S.dlayer);
     }
-    S.dmap.fitBounds(S.dline.getBounds(), { padding: [40, 40], maxZoom: 16 });
+    fitDetail();
   } else if (S.pos) {
     S.dmap.setView([S.pos.lat, S.pos.lng], 14);
   } else {
