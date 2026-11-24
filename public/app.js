@@ -349,7 +349,8 @@ function idleCard() {
     return `<div class="hello"><h2>Hi ${name}</h2><p>${sub}</p></div>
       <button class="btn" data-act="start">${ICON.car} Fahrt jetzt starten</button>`;
   }
-  return `<div class="hello"><h2>Hi ${name}</h2><p>Sobald ein Freund losfährt, siehst du ihn hier und auf der Karte. Mit einem Tipp fährst du mit – sitzt du schon im Auto, fragt dich die App von selbst.</p></div>`;
+  return `<div class="hello"><h2>Hi ${name}</h2><p>Sobald ein Freund losfährt, siehst du ihn hier und auf der Karte. Mit einem Tipp fährst du mit – sitzt du schon im Auto, fragt dich die App von selbst.</p></div>
+    <button class="btn ghost" data-act="start">${ICON.car} Ich fahre selbst – Fahrt starten</button>`;
 }
 
 function driveCard(r) {
