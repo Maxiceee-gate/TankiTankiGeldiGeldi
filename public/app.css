@@ -45,6 +45,8 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
   overflow-y: auto; -webkit-overflow-scrolling: touch;
   padding: calc(var(--st) + 22px) max(16px, var(--sr)) 32px max(16px, var(--sl));
 }
+.page-head { display: flex; align-items: flex-start; justify-content: space-between; }
+.page-head .round-btn { background: var(--ac); color: var(--ac-ink); }
 .page h1 { font-size: 42px; font-weight: 800; text-transform: uppercase; line-height: 1; margin-bottom: 18px; }
 .overlay { position: fixed; inset: 0; z-index: 900; background: var(--bg); }
 
@@ -68,7 +70,7 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 }
 
 /* ── Buttons & controls ────────────────────────────────────────────────── */
-.btn {
+.btn { text-decoration: none;
   display: flex; align-items: center; justify-content: center; gap: 8px; width: 100%;
   height: 54px; border-radius: 14px; background: var(--ac); color: var(--ac-ink);
   font-weight: 700; font-size: 16px; letter-spacing: .01em; transition: transform .1s, opacity .2s;
@@ -337,3 +339,4 @@ sup { font-size: .6em; vertical-align: .45em; margin-left: 1px; }
   .sheet { margin: 0 auto; transform: none; }
   .page > * { max-width: 640px; margin-left: auto; margin-right: auto; }
 }
+.sheet .search { background: var(--s2); }

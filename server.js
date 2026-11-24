@@ -16,6 +16,65 @@ const DEFAULT_CONSUMPTION = { benzin: 7.5, diesel: 6.0, lpg: 9.5, elektro: 18 };
 const FUEL_TYPES = Object.keys(DEFAULT_CONSUMPTION);
 const COLORS = ['#C8F03C', '#5CE1E6', '#FF8A5B', '#B69CFF', '#FFD25E', '#6EE7A8', '#FF6B9A', '#7AA7FF'];
 
+// Real-world consumption (l/100 km) per car: city, rural (~80 km/h), motorway (~130 km/h)
+const slug = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+const CARS = require('./data/cars.json').map(([brand, model, engine, fuel, city, rural, motorway]) => ({
+  id: slug(`${brand} ${model} ${engine}`), brand, model, engine, fuel, city, rural, motorway,
+  combined: Math.round((city + rural + motorway) / 3 * 10) / 10,
+}));
+const CAR_BY_ID = new Map(CARS.map(c => [c.id, c]));
+const carLabel = c => c && `${c.brand} ${c.model} ${c.engine}`;
+
+// Consumption at a given average speed, interpolated between the car's three profile points
+function consAt(car, v) {
+  if (v <= 25) return car.city * (1 + (25 - v) / 25 * 0.35);
+  if (v <= 80) return car.city + (car.rural - car.city) * (v - 25) / 55;
+  if (v <= 130) return car.rural + (car.motorway - car.rural) * (v - 80) / 50;
+  return car.motorway * (1 + (v - 130) * 0.012);
+}
+
+// Cumulative fuel along the route: [[km, liters], ...] from ~500 m chunks at their real speed
+function fuelProfile(ride) {
+  const car = CAR_BY_ID.get(ride.car_id);
+  if (!car) return null;
+  const pts = db.prepare('SELECT lat, lng, ts FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id);
+  if (pts.length < 2) return null;
+  const prof = [[0, 0]];
+  let km = 0, liters = 0, chunkKm = 0, chunkT0 = pts[0].ts;
+  for (let i = 1; i < pts.length; i++) {
+    chunkKm += haversine(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng);
+    if (chunkKm >= 0.5 || i === pts.length - 1) {
+      const hours = Math.max(pts[i].ts - chunkT0, 1) / 3600;
+      const v = Math.min(Math.max(chunkKm / hours, 3), 220);
+      liters += chunkKm * consAt(car, v) / 100;
+      km += chunkKm;
+      prof.push([km, liters]);
+      chunkKm = 0;
+      chunkT0 = pts[i].ts;
+    }
+  }
+  // Scale km to the stored total so participant km offsets line up exactly
+  const total = ride.total_distance || km;
+  return km > 0 ? prof.map(([k, l]) => [k * total / km, l]) : null;
+}
+
+function litersAt(prof, x) {
+  for (let i = 1; i < prof.length; i++) {
+    if (x <= prof[i][0]) {
+      const [k0, l0] = prof[i - 1], [k1, l1] = prof[i];
+      return k1 === k0 ? l1 : l0 + (l1 - l0) * (x - k0) / (k1 - k0);
+    }
+  }
+  return prof[prof.length - 1][1];
+}
+
+function ibanOk(s) {
+  if (!/^[A-Z]{2}\d{2}[A-Z0-9]{10,30}$/.test(s)) return false;
+  let m = 0;
+  for (const ch of (s.slice(4) + s.slice(0, 4)).replace(/[A-Z]/g, c => c.charCodeAt(0) - 55)) m = (m * 10 + +ch) % 97;
+  return m === 1;
+}
+
 // ── Database ──────────────────────────────────────────────────────────────────
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
@@ -79,10 +138,11 @@ function ensureCols(table, cols) {
 ensureCols('users', {
   role: "TEXT DEFAULT 'passenger'", auto_start: 'INTEGER DEFAULT 1', car_name: 'TEXT',
   fuel_type: "TEXT DEFAULT 'benzin'", consumption: 'REAL', default_price: 'REAL', avatar_v: 'INTEGER',
+  cons_mode: "TEXT DEFAULT 'manual'", car_id: 'TEXT', revolut: 'TEXT', iban: 'TEXT', account_name: 'TEXT',
 });
 ensureCols('rides', {
   consumption: 'REAL', last_lat: 'REAL', last_lng: 'REAL', last_speed: 'REAL',
-  last_ts: 'INTEGER', last_seen: 'INTEGER', auto_started: 'INTEGER DEFAULT 0',
+  last_ts: 'INTEGER', last_seen: 'INTEGER', auto_started: 'INTEGER DEFAULT 0', car_id: 'TEXT',
 });
 ensureCols('ride_participants', {
   from_km: 'REAL DEFAULT 0', to_km: 'REAL', share_eur: 'REAL', paid_at: 'INTEGER', paid_by: 'INTEGER',
@@ -155,7 +215,13 @@ function meJson(u) {
   return {
     ...pub(u), role: u.role, auto_start: !!u.auto_start, car_name: u.car_name,
     fuel_type: u.fuel_type || 'benzin', consumption: u.consumption, default_price: u.default_price,
+    cons_mode: u.cons_mode === 'car' ? 'car' : 'manual', car: CAR_BY_ID.get(u.car_id) || null,
+    revolut: u.revolut, iban: u.iban, account_name: u.account_name,
   };
+}
+
+function payInfo(u) {
+  return u && (u.revolut || u.iban) ? { revolut: u.revolut, iban: u.iban, account_name: u.account_name || u.username } : null;
 }
 
 function partJson(p) {
@@ -173,7 +239,7 @@ function rideCard(r, meId, parts = q.parts.all(r.id)) {
   return {
     id: r.id, status: r.status, started_at: r.started_at, ended_at: r.ended_at,
     total_distance: r.total_distance || 0, fuel_type: r.fuel_type, fuel_price: r.fuel_price,
-    consumption: r.consumption, auto_started: !!r.auto_started,
+    consumption: r.consumption, auto_started: !!r.auto_started, car: carLabel(CAR_BY_ID.get(r.car_id)) || null,
     last_lat: r.last_lat, last_lng: r.last_lng, last_speed: r.last_speed, last_seen: r.last_seen,
     driver: pub(q.userById.get(r.driver_id)),
     participants: parts.map(partJson),
@@ -182,9 +248,12 @@ function rideCard(r, meId, parts = q.parts.all(r.id)) {
 }
 
 // Cost is split per stretch of road among everyone in the car at that time, driver included.
-function shareCalc(ride, parts) {
+function shareCalc(ride, parts, prof = fuelProfile(ride)) {
   const total = ride.total_distance || 0;
-  const perKm = ride.fuel_price && ride.consumption ? ride.consumption / 100 * ride.fuel_price : null;
+  const perKm = ride.fuel_price && (ride.consumption || prof) ? (ride.consumption || 7.5) / 100 * ride.fuel_price : null;
+  const costBetween = prof
+    ? (a, b) => (litersAt(prof, b) - litersAt(prof, a)) * ride.fuel_price
+    : (a, b) => (b - a) * perKm;
   const shares = {};
   let driverShare = 0;
   parts.forEach(p => { shares[p.id] = 0; });
@@ -194,14 +263,15 @@ function shareCalc(ride, parts) {
     for (let i = 1; i < cuts.length; i++) {
       const a = cuts[i - 1], b = cuts[i];
       const inCar = parts.filter(p => { const [x, y] = span(p); return x <= a && y >= b; });
-      const each = (b - a) * perKm / (inCar.length + 1);
+      const each = costBetween(a, b) / (inCar.length + 1);
       driverShare += each;
       inCar.forEach(p => { shares[p.id] += each; });
     }
   }
   for (const k in shares) shares[k] = perKm === null ? null : r2(shares[k]);
   return {
-    perKm, totalCost: perKm === null ? null : r2(total * perKm),
+    perKm, totalCost: perKm === null ? null : r2(costBetween(0, total)),
+    effConsumption: prof && total > 0 ? Math.round(litersAt(prof, total) / total * 1000) / 10 : null,
     driverShare: perKm === null ? null : r2(driverShare), shares,
   };
 }
@@ -211,8 +281,11 @@ function settle(rideId) {
   const ride = q.ride.get(rideId);
   if (!ride) return;
   const parts = q.parts.all(rideId);
-  const { shares } = shareCalc(ride, parts);
-  db.transaction(() => parts.forEach(p => updShare.run(shares[p.id], p.id)))();
+  const { shares, effConsumption } = shareCalc(ride, parts);
+  db.transaction(() => {
+    if (effConsumption) db.prepare('UPDATE rides SET consumption = ? WHERE id = ?').run(effConsumption, rideId);
+    parts.forEach(p => updShare.run(shares[p.id], p.id));
+  })();
 }
 
 const insPoint = db.prepare('INSERT INTO gps_points (ride_id, lat, lng, speed, ts) VALUES (?, ?, ?, ?, ?)');
@@ -343,6 +416,23 @@ route('PUT', '/api/me', true, ({ user, body }) => {
   }
   if ('consumption' in body) u.consumption = num(body.consumption, 1, 40);
   if ('default_price' in body) u.default_price = num(body.default_price, 0.1, 5);
+  if ('cons_mode' in body) u.cons_mode = body.cons_mode === 'car' ? 'car' : 'manual';
+  if ('car_id' in body) {
+    const car = body.car_id ? CAR_BY_ID.get(body.car_id) || fail(400, 'Auto nicht gefunden.') : null;
+    u.car_id = car ? car.id : null;
+    if (car) u.fuel_type = car.fuel;
+  }
+  if ('revolut' in body) {
+    const r = String(body.revolut || '').trim().replace(/^(https?:\/\/)?(www\.)?revolut\.me\//i, '').replace(/^@/, '').replace(/\/.*$/, '');
+    if (r && !/^[a-z0-9._-]{3,40}$/i.test(r)) fail(400, 'Revolut-Nutzername ungültig.');
+    u.revolut = r || null;
+  }
+  if ('iban' in body) {
+    const iban = String(body.iban || '').replace(/\s+/g, '').toUpperCase();
+    if (iban && !ibanOk(iban)) fail(400, 'Die IBAN ist ungültig – bitte nochmal prüfen.');
+    u.iban = iban || null;
+  }
+  if ('account_name' in body) u.account_name = String(body.account_name || '').trim().slice(0, 60) || null;
   if ('avatar_color' in body) {
     if (!/^#[0-9a-f]{6}$/i.test(body.avatar_color)) fail(400, 'Ungültige Farbe.');
     u.avatar_color = body.avatar_color;
@@ -383,12 +473,14 @@ route('GET', '/api/rides/:id', true, ({ user, params }) => {
   const parts = q.parts.all(ride.id);
   if (ride.driver_id !== user.id && !parts.some(p => p.user_id === user.id) && !isFriend(user.id, ride.driver_id)) fail(403, 'Keine Berechtigung.');
   const calc = shareCalc(ride, parts);
+  const mine = parts.find(p => p.user_id === user.id);
+  const pay = mine ? payInfo(q.userById.get(ride.driver_id)) : null;
   const points = db.prepare('SELECT lat, lng FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id).map(p => [p.lat, p.lng]);
   const card = rideCard(ride, user.id, parts);
   card.participants.forEach(p => { p.live_share = calc.shares[p.id]; });
   return {
     ride: card, points, joinable: ride.status === 'active' || ride.ended_at > now() - JOIN_WINDOW,
-    calc: { perKm: calc.perKm, totalCost: calc.totalCost, driverShare: calc.driverShare },
+    calc: { perKm: calc.perKm, totalCost: calc.totalCost, driverShare: calc.driverShare, effConsumption: calc.effConsumption }, pay,
   };
 });
 
@@ -399,11 +491,12 @@ route('POST', '/api/rides', true, ({ user, body }) => {
   const t = now();
   const firstTs = pts.length ? Math.round(Math.min(...pts.map(p => +p.ts || t))) : t;
   const started = Math.max(Math.min(firstTs, t), t - 900);
-  const fuel = user.fuel_type || 'benzin';
+  const car = user.cons_mode === 'car' ? CAR_BY_ID.get(user.car_id) : null;
+  const fuel = car ? car.fuel : user.fuel_type || 'benzin';
   const id = db.prepare(`
-    INSERT INTO rides (driver_id, fuel_type, consumption, fuel_price, started_at, last_seen, auto_started)
-    VALUES (?, ?, ?, ?, ?, ?, ?)`).run(user.id, fuel, user.consumption || DEFAULT_CONSUMPTION[fuel],
-    user.default_price, started, t, body.auto ? 1 : 0).lastInsertRowid;
+    INSERT INTO rides (driver_id, fuel_type, consumption, fuel_price, started_at, last_seen, auto_started, car_id)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, fuel, car ? car.combined : user.consumption || DEFAULT_CONSUMPTION[fuel],
+    user.default_price, started, t, body.auto ? 1 : 0, car ? car.id : null).lastInsertRowid;
   const ride = addPoints(q.ride.get(id), pts.filter(p => +p.ts >= started));
   send(audience(ride), { type: 'ride_started', rideId: id, driver: user.username }, user.id);
   return { ride: rideCard(ride, user.id) };
@@ -441,7 +534,7 @@ route('PUT', '/api/rides/:id', true, ({ user, params, body }) => {
     u.fuel_type = body.fuel_type;
   }
   if ('fuel_price' in body) u.fuel_price = num(body.fuel_price, 0.1, 5);
-  if ('consumption' in body) u.consumption = num(body.consumption, 1, 40);
+  if ('consumption' in body) { u.consumption = num(body.consumption, 1, 40); u.car_id = null; }
   const keys = Object.keys(u);
   if (keys.length) db.prepare(`UPDATE rides SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => u[k]), ride.id);
   settle(ride.id);
@@ -536,6 +629,7 @@ route('GET', '/api/balances', true, ({ user }) => {
   }
   for (const o of owe) {
     const b = bucket('u' + o.user_id, pub({ id: o.user_id, username: o.username, avatar_color: o.avatar_color, avatar_v: o.avatar_v }));
+    b.pay ??= payInfo(q.userById.get(o.user_id));
     b.net -= o.share_eur; outgoing += o.share_eur;
     b.items.push({ pid: o.id, ride_id: o.ride_id, amount: o.share_eur, dir: 'out', started_at: o.started_at, km: o.total_distance });
   }
@@ -591,6 +685,21 @@ route('GET', '/api/users/search', true, ({ user, url }) => {
     })),
   };
 });
+
+route('GET', '/api/users', true, ({ user }) => {
+  const rows = db.prepare(`
+    SELECT u.*, f.status AS f_status, f.requester_id AS f_req FROM users u
+    LEFT JOIN friendships f ON (f.requester_id = ? AND f.addressee_id = u.id) OR (f.addressee_id = ? AND f.requester_id = u.id)
+    WHERE u.id != ? ORDER BY u.username COLLATE NOCASE`).all(user.id, user.id, user.id);
+  return {
+    users: rows.map(u => ({
+      ...pub(u), role: u.role,
+      status: !u.f_status ? 'none' : u.f_status === 'accepted' ? 'friends' : u.f_req === user.id ? 'sent' : 'received',
+    })),
+  };
+});
+
+route('GET', '/api/cars', false, () => ({ cars: CARS }));
 
 route('POST', '/api/friends/request', true, ({ user, body }) => {
   const target = body.userId

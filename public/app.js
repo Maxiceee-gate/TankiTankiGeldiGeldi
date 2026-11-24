@@ -54,6 +54,8 @@ function price(p, unit) {
   return `${s.slice(0, -1)}<sup>${s.slice(-1)}</sup> €/${unit}`;
 }
 
+const fmtIban = s => (s || '').replace(/(.{4})/g, '$1 ').trim();
+
 function meters(a, b) {
   const R = 6371000, rad = Math.PI / 180;
   const x = Math.sin((b.lat - a.lat) * rad / 2) ** 2 + Math.cos(a.lat * rad) * Math.cos(b.lat * rad) * Math.sin((b.lng - a.lng) * rad / 2) ** 2;
@@ -148,6 +150,7 @@ function boot() {
   document.addEventListener('click', onClick);
   document.addEventListener('change', onChange);
   $('friend-q').addEventListener('input', onSearch);
+  document.addEventListener('input', e => { if (e.target.id === 'car-q') renderCarList(e.target.value); });
   $('auth-form').addEventListener('submit', onAuth);
   $('photo-input').addEventListener('change', e => { const f = e.target.files[0]; e.target.value = ''; if (f) onPhoto(f); });
   window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); S.installEvt = e; if (S.tab === 'home') renderHome(); });
@@ -870,7 +873,7 @@ function renderDetail() {
       <div class="section-h"><span>${live ? 'Kosten bisher' : 'Spritkosten'}</span></div>
       ${calc.totalCost != null ? `<div class="cost-big">${eur(calc.totalCost)}</div>` : '<div class="cost-big missing">Preis fehlt</div>'}
     </div>${driver ? `<button class="pill ghost" data-act="edit-price">${calc.totalCost != null ? 'Ändern' : 'Eintragen'}</button>` : ''}</div>
-    <div class="cost-meta"><span>${(FUEL[r.fuel_type] || FUEL.benzin).label}</span><span><b>${price(r.fuel_price, unit)}</b></span><span><b>${dec(r.consumption)}</b> ${unit}/100 km</span></div>
+    <div class="cost-meta">${r.car ? `<span><b>${esc(r.car)}</b></span>` : ''}<span>${(FUEL[r.fuel_type] || FUEL.benzin).label}</span><span><b>${price(r.fuel_price, unit)}</b></span><span><b>${dec(calc.effConsumption || r.consumption)}</b> ${unit}/100 km${calc.effConsumption ? ' (nach Fahrweise)' : ''}</span></div>
     ${calc.totalCost == null && !driver ? `<p class="note">${esc(r.driver.username)} muss noch den Spritpreis eintragen.</p>` : ''}
   </div>`;
 
@@ -883,7 +886,9 @@ function renderDetail() {
     const share = p.live_share;
     let right = `<div class="amount">${share != null ? eur(share) : '–'}</div>`;
     if (!live && share > 0 && (driver || self)) {
-      right = `<div class="amount">${eur(share)}</div><button class="paid-btn ${p.paid_at ? 'on' : ''}" data-act="paid" data-pid="${p.id}" data-paid="${p.paid_at ? 0 : 1}">${p.paid_at ? 'Bezahlt' : driver ? 'Offen' : 'Zahlen'}</button>`;
+      right = `<div class="amount">${eur(share)}</div>${self && !p.paid_at
+        ? '<button class="paid-btn" data-act="pay-ride">Zahlen</button>'
+        : `<button class="paid-btn ${p.paid_at ? 'on' : ''}" data-act="paid" data-pid="${p.id}" data-paid="${p.paid_at ? 0 : 1}">${p.paid_at ? 'Bezahlt' : 'Offen'}</button>`}`;
     }
     h += `<div class="row">${av(p, 40)}<div class="grow"><b class="ell">${self ? 'Du' : esc(p.username)}${p.guest ? ' <span class="mu">(Gast)</span>' : ''}</b><small>${seg || (live ? 'seit Start dabei' : 'ganze Strecke')}${p.to_km != null && live ? ' · ausgestiegen' : ''}</small></div>
       ${right}${driver && !p.paid_at ? `<button class="x-btn" data-act="rm-part" data-pid="${p.id}" aria-label="Entfernen">${ICON.x}</button>` : ''}</div>`;
@@ -916,7 +921,8 @@ function editPriceSheet() {
       <label class="field"><span>Preis</span><div class="unit-input"><input id="p-price" inputmode="decimal" placeholder="1,799" value="${r.fuel_price ? String(r.fuel_price).replace('.', ',') : ''}"><em>€/${unit}</em></div></label>
       <label class="field"><span>Verbrauch</span><div class="unit-input"><input id="p-cons" inputmode="decimal" placeholder="7,5" value="${r.consumption ? String(r.consumption).replace('.', ',') : ''}"><em>/100 km</em></div></label>
     </div>
-    <label class="check"><input type="checkbox" id="p-default" checked> Als Standard für mein Auto speichern</label>
+    ${r.car ? `<p class="note">Verbrauch berechnet aus ${esc(r.car)} und deiner Fahrweise. Änderst du ihn, gilt dein Wert.</p>` : ''}
+    <label class="check"><input type="checkbox" id="p-default" checked> Preis als Standard speichern</label>
     <div style="height:18px"></div>
     <button class="btn" data-act="save-price">Speichern & neu berechnen</button>`);
 }
@@ -924,11 +930,13 @@ function editPriceSheet() {
 async function savePrice() {
   const r = S.detail.ride;
   const type = $('p-type').value;
-  const body = { fuel_type: type, fuel_price: $('p-price').value.trim(), consumption: $('p-cons').value.trim() || String(FUEL[type].cons) };
+  const body = { fuel_type: type, fuel_price: $('p-price').value.trim() };
+  const cons = $('p-cons').value.trim();
+  if (cons !== $('p-cons').defaultValue || !r.car) body.consumption = cons || String(FUEL[type].cons);
   if (!body.fuel_price) return toast('Bitte einen Preis eintragen', 'err');
   const res = await call('PUT', `/api/rides/${r.id}`, body, 'Kosten neu berechnet');
   if (res.error) return;
-  if ($('p-default').checked) await saveMe({ fuel_type: body.fuel_type, default_price: body.fuel_price, consumption: body.consumption || null });
+  if ($('p-default').checked) await saveMe(S.me.cons_mode === 'car' ? { default_price: body.fuel_price } : { fuel_type: body.fuel_type, default_price: body.fuel_price, consumption: body.consumption || null });
   closeSheet();
   openDetail(r.id, true);
   loadFeed();
@@ -994,6 +1002,7 @@ async function loadMoney() {
   const body = $('money-body');
   const r = await api('GET', '/api/balances');
   if (r.error) { body.innerHTML = `<div class="empty">${esc(r.error)}</div>`; return; }
+  S.balances = r.balances;
   let h = `<div class="totals">
     <div class="total in"><span>Du bekommst</span><b>${eur(r.incoming)}</b></div>
     <div class="total out"><span>Du schuldest</span><b>${eur(r.outgoing)}</b></div></div>`;
@@ -1015,7 +1024,7 @@ async function loadMoney() {
             <div class="grow tap" data-act="ride" data-id="${i.ride_id}"><b>${dateStr(i.started_at)}</b><small>${kmNum(i.km)} km · ${i.dir === 'in' ? 'bekommst du' : 'zahlst du'}</small></div>
             <div class="amount ${i.dir}">${eur(i.amount)}</div>
             <button class="paid-btn" data-act="paid" data-pid="${i.pid}" data-paid="1">${i.dir === 'in' ? 'Erhalten' : 'Bezahlt'}</button></div>`).join('')}
-          <div style="height:10px"></div><button class="btn sm dark" style="width:100%" data-act="settle" data-key="${esc(b.key)}" data-name="${esc(b.who.username)}">Alles ausgleichen (${eur(Math.abs(b.net))})</button></div>` : ''}
+          <div style="height:10px"></div>${b.net < 0 ? `<button class="btn sm" style="width:100%" data-act="pay-bal" data-key="${esc(b.key)}">${eur(-b.net)} bezahlen</button><div style="height:8px"></div>` : ''}<button class="btn sm dark" style="width:100%" data-act="settle" data-key="${esc(b.key)}" data-name="${esc(b.who.username)}">Alles ausgleichen (${eur(Math.abs(b.net))})</button></div>` : ''}
       </div>`;
     }
     h += '</div>';
@@ -1098,16 +1107,33 @@ function renderProfile() {
   }
   h += '</div>';
   if (m.role === 'driver') {
-    h += `<div class="card"><div class="card-h">Dein Auto</div>
-      <label class="field"><span>Name (optional)</span><input id="car-name" maxlength="40" placeholder="z. B. Golf 7" value="${esc(m.car_name || '')}"></label>
+    const car = m.car;
+    h += `<div class="card"><div class="card-h">Dein Auto & Verbrauch</div><div style="height:10px"></div>
+      <div class="seg"><button class="${m.cons_mode !== 'car' ? 'on' : ''}" data-act="cons-mode" data-mode="manual">Manuell</button><button class="${m.cons_mode === 'car' ? 'on' : ''}" data-act="cons-mode" data-mode="car">Aus Datenbank</button></div>`;
+    if (m.cons_mode === 'car') {
+      h += `<button class="row tap" style="width:100%;text-align:left" data-act="car-pick">${ICON.car}<div class="grow"><b>${car ? esc(`${car.brand} ${car.model}`) : 'Auto auswählen'}</b><small>${car ? esc(car.engine) + ' · ' + FUEL[car.fuel].label : 'Marke, Modell und Motor'}</small></div>${ICON.chev}</button>
+        ${car ? `<div class="cost-meta" style="margin-top:0"><span>Stadt <b>${dec(car.city)}</b></span><span>Land <b>${dec(car.rural)}</b></span><span>Autobahn <b>${dec(car.motorway)}</b> l/100 km</span></div>` : ''}
+        <p class="note">Der Verbrauch wird pro Abschnitt aus deinem tatsächlich gefahrenen Tempo berechnet – Stadtverkehr, Landstraße und Autobahn zählen unterschiedlich. Die Werte sind Praxis-Schätzungen.</p>
+        <label class="field"><span>Spritpreis</span><div class="unit-input"><input id="car-price" inputmode="decimal" placeholder="1,799" value="${m.default_price ? String(m.default_price).replace('.', ',') : ''}"><em>€/${unit}</em></div></label>
+        <div style="height:14px"></div><button class="btn" data-act="save-car-price">Speichern</button>`;
+    } else {
+      h += `<label class="field"><span>Name (optional)</span><input id="car-name" maxlength="40" placeholder="z. B. Golf 7" value="${esc(m.car_name || '')}"></label>
       <label class="field"><span>Kraftstoff</span><select id="car-type">${opts}</select></label>
       <div class="field-row">
         <label class="field"><span>Verbrauch</span><div class="unit-input"><input id="car-cons" inputmode="decimal" placeholder="${String(FUEL[m.fuel_type]?.cons || 7.5).replace('.', ',')}" value="${m.consumption ? String(m.consumption).replace('.', ',') : ''}"><em>/100 km</em></div></label>
         <label class="field"><span>Spritpreis</span><div class="unit-input"><input id="car-price" inputmode="decimal" placeholder="1,799" value="${m.default_price ? String(m.default_price).replace('.', ',') : ''}"><em>€/${unit}</em></div></label>
       </div>
-      <span class="hint" style="display:block;margin-top:8px;color:var(--mu);font-size:13px">Mit Preis und Verbrauch rechnet die App schon während der Fahrt. Nach dem Tanken einfach den Preis anpassen.</span>
-      <div style="height:14px"></div><button class="btn" data-act="save-car">Speichern</button></div>`;
+      <p class="note">Fester Verbrauch, egal wie du fährst. Nach dem Tanken einfach den Preis anpassen.</p>
+      <div style="height:14px"></div><button class="btn" data-act="save-car">Speichern</button>`;
+    }
+    h += '</div>';
   }
+  h += `<div class="card"><div class="card-h">Zahlungsdaten</div>
+    <p class="note" style="margin-top:6px">Sehen nur Freunde, die dir Spritgeld schulden – so können sie mit einem Tipp bezahlen.</p>
+    <label class="field"><span>Revolut-Nutzername</span><input id="pay-revolut" autocapitalize="off" placeholder="z. B. maxi123 (aus revolut.me/…)" value="${esc(m.revolut || '')}"></label>
+    <label class="field"><span>IBAN</span><input id="pay-iban" autocapitalize="characters" placeholder="DE89 3704 0044 0532 0130 00" value="${esc(fmtIban(m.iban))}"></label>
+    <label class="field"><span>Kontoinhaber</span><input id="pay-name" placeholder="Vor- und Nachname" value="${esc(m.account_name || '')}"></label>
+    <div style="height:14px"></div><button class="btn ghost" data-act="save-pay">Zahlungsdaten speichern</button></div>`;
   h += `<div class="card"><div class="card-h">App</div>
     <div class="row"><div class="grow"><b>Benachrichtigungen</b><small>Wenn Freunde losfahren oder dich hinzufügen</small></div>
       ${!('Notification' in window) ? '<span class="mu">nicht verfügbar</span>' : notifOn ? '<span class="pill done">An</span>' : Notification.permission === 'denied' ? '<span class="mu">blockiert</span>' : '<button class="pill" data-act="notif">Aktivieren</button>'}</div>
@@ -1170,6 +1196,50 @@ function installSheet() {
     <div style="height:14px"></div><button class="btn ghost" data-act="install-hide">Nicht mehr anzeigen</button>`);
 }
 
+function paySheet(to, pay, amount, pids) {
+  S.payPids = pids;
+  const ref = `Tanki Sprit ${new Date().toLocaleDateString('de-DE')}`;
+  const copyRow = (label, value, show = value) => `<div class="row"><div class="grow"><small>${label}</small><b class="ell" style="user-select:text">${esc(show)}</b></div><button class="pill ghost" data-act="copy" data-v="${esc(value)}">Kopieren</button></div>`;
+  let h = `<div class="center">${av(to, 64)}</div><h3 class="center">${eur(amount)} an ${esc(to.username)}</h3>`;
+  if (!pay) {
+    h += `<p class="center">${esc(to.username)} hat noch keine Zahlungsdaten hinterlegt. Zahl bar oder frag nach PayPal/IBAN – und markier es danach als bezahlt.</p>`;
+  } else {
+    h += '<p class="center">Bezahl per Revolut oder Überweisung und markier es danach als bezahlt.</p>';
+    if (pay.revolut) h += `<a class="btn" href="https://revolut.me/${encodeURIComponent(pay.revolut)}" target="_blank" rel="noopener">Mit Revolut bezahlen</a><div style="height:10px"></div>`;
+    h += copyRow('Betrag', amount.toFixed(2).replace('.', ','), eur(amount));
+    if (pay.iban) h += copyRow('IBAN', pay.iban, fmtIban(pay.iban)) + copyRow('Empfänger', pay.account_name);
+    h += copyRow('Verwendungszweck', ref);
+  }
+  h += `<div style="height:14px"></div><button class="btn ${pay ? 'ghost' : ''}" data-act="pay-done">Ich habe bezahlt</button>`;
+  openSheet(h);
+}
+
+async function carPickSheet() {
+  if (!S.cars) { const r = await call('GET', '/api/cars'); if (r.error) return; S.cars = r.cars; }
+  openSheet(`<h3>Dein Auto</h3><p>Marke, Modell oder Motor eintippen. E-Autos sind nicht dabei – dafür „Manuell“ nutzen.</p>
+    <div class="search"><svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg><input id="car-q" placeholder="z. B. Golf TDI" autocomplete="off"></div>
+    <div id="car-list"></div>
+    <p class="note">Dein Auto fehlt? Nimm ein ähnliches Modell mit gleichem Motor oder stell auf „Manuell“.</p>`);
+  renderCarList('');
+}
+
+function renderCarList(term) {
+  const words = term.toLowerCase().split(/\s+/).filter(Boolean);
+  const list = S.cars.filter(c => { const t = `${c.brand} ${c.model} ${c.engine} ${c.fuel}`.toLowerCase(); return words.every(w => t.includes(w)); }).slice(0, 60);
+  $('car-list').innerHTML = list.map(c => `<button class="row tap" style="width:100%;text-align:left" data-act="car-set" data-id="${esc(c.id)}">
+      <div class="grow"><b>${esc(c.brand)} ${esc(c.model)}</b><small>${esc(c.engine)} · ${FUEL[c.fuel].label}</small></div>
+      <div class="amount" style="font-size:16px">${dec(c.combined)}<small>l/100 km</small></div></button>`).join('') || '<div class="empty">Nichts gefunden.</div>';
+}
+
+async function allUsersSheet() {
+  const r = await call('GET', '/api/users');
+  if (r.error) return;
+  const label = { friends: '<span class="pill done">Freund</span>', sent: '<span class="pill done">Gesendet</span>' };
+  openSheet(`<h3>Alle Nutzer</h3><p>${r.users.length} ${r.users.length === 1 ? 'Person nutzt' : 'Personen nutzen'} Tanki.</p>
+    ${r.users.map(u => `<div class="row">${av(u, 40)}<div class="grow"><b class="ell">${esc(u.username)}</b><small>${u.role === 'driver' ? 'Fahrer' : 'Mitfahrer'}</small></div>
+      ${label[u.status] || `<button class="pill" data-act="f-add" data-uid="${u.id}">${u.status === 'received' ? 'Annehmen' : 'Hinzufügen'}</button>`}</div>`).join('') || '<div class="empty">Außer dir ist noch niemand angemeldet.</div>'}`);
+}
+
 // ── Event delegation ──────────────────────────────────────────────────────────
 const ACT = {
   'auth-mode': el => setAuthMode(el.dataset.mode),
@@ -1220,6 +1290,34 @@ const ACT = {
     if (!r.error) loadMoney();
   }),
   invite: () => invite(),
+  'all-users': () => allUsersSheet(),
+  'cons-mode': el => saveMe({ cons_mode: el.dataset.mode }),
+  'car-pick': () => carPickSheet(),
+  'car-set': async el => { const r = await saveMe({ car_id: el.dataset.id, cons_mode: 'car' }, 'Auto gespeichert'); if (!r.error) closeSheet(); },
+  'save-car-price': () => saveMe({ default_price: $('car-price').value.trim() || null }, 'Gespeichert'),
+  'save-pay': () => saveMe({ revolut: $('pay-revolut').value, iban: $('pay-iban').value, account_name: $('pay-name').value }, 'Zahlungsdaten gespeichert'),
+  copy: async el => {
+    try { await navigator.clipboard.writeText(el.dataset.v); toast('Kopiert'); }
+    catch { toast('Kopieren nicht möglich – bitte manuell markieren', 'err'); }
+  },
+  'pay-bal': el => {
+    const b = S.balances.find(x => x.key === el.dataset.key);
+    if (b) paySheet(b.who, b.pay, -b.net, b.items.filter(i => i.dir === 'out').map(i => i.pid));
+  },
+  'pay-ride': () => {
+    const { ride, pay } = S.detail;
+    paySheet(ride.driver, pay, ride.my_part.share_eur, [ride.my_part.id]);
+  },
+  'pay-done': async () => {
+    for (const pid of S.payPids || []) {
+      const r = await call('POST', `/api/participants/${pid}/paid`, { paid: true });
+      if (r.error) return;
+    }
+    closeSheet();
+    toast('Als bezahlt markiert');
+    if (S.detail) openDetail(S.detail.ride.id, true);
+    if (S.tab === 'money') loadMoney();
+  },
   'paste-invite': () => pasteInvite(),
   'invite-submit': () => addInvite(parseInvite($('invite-input').value)),
   'copy-invite': async () => {
