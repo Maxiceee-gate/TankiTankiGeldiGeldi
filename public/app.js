@@ -161,7 +161,46 @@ function showAuth() {
   for (const id of ['home', 'rides', 'money', 'friends', 'detail', 'profile']) $(id).hidden = true;
   $('tabbar').hidden = true;
   $('auth').hidden = false;
+  const inviter = lsGet('pendingAdd');
+  const banner = $('invite-banner');
+  banner.hidden = !inviter;
+  if (inviter) {
+    if (S.authMode === 'login') S.authMode = 'register';
+    banner.innerHTML = `<b>${esc(inviter)} lädt dich ein</b>
+      <p>${isIOS && !isStandalone()
+        ? 'Neu hier? Registrier dich unten. Hast du Tanki schon auf dem Startbildschirm? Dann kopier die Einladung, öffne Tanki und tippe bei <b style="display:inline;font:inherit;text-transform:none">Freunde</b> auf „Einladung einfügen“.'
+        : 'Registrier dich oder melde dich an – danach seid ihr automatisch befreundet.'}</p>
+      ${isIOS && !isStandalone() ? '<button type="button" class="btn ghost" data-act="copy-invite">Einladung kopieren</button>' : ''}`;
+  }
   setAuthMode(S.authMode);
+}
+
+function parseInvite(text) {
+  const t = String(text || '').trim();
+  try { const name = new URL(t).searchParams.get('add'); if (name) return name; } catch { /* not a URL */ }
+  return /^[\p{L}\p{N}_.-]{2,20}$/u.test(t) ? t : null;
+}
+
+async function addInvite(name) {
+  if (!name) return toast('Keine gültige Einladung gefunden', 'err');
+  if (name.toLowerCase() === S.me.username.toLowerCase()) return toast('Das ist deine eigene Einladung');
+  const r = await call('POST', '/api/friends/request', { username: name });
+  if (r.error) return;
+  toast(r.status === 'friends' ? `Du bist jetzt mit ${name} befreundet` : `Freundschaftsanfrage an ${name} gesendet`);
+  closeSheet();
+  loadFeed();
+  if (S.tab === 'friends') loadFriends();
+}
+
+async function pasteInvite() {
+  try {
+    const text = await navigator.clipboard.readText();
+    const name = parseInvite(text);
+    if (name) return addInvite(name);
+  } catch { /* clipboard read blocked */ }
+  openSheet(`<h3>Einladung einfügen</h3><p>Füge den Einladungslink oder den Nutzernamen ein.</p>
+    <label class="field"><input id="invite-input" placeholder="Link oder Nutzername" autocapitalize="off"></label>
+    <div style="height:14px"></div><button class="btn" data-act="invite-submit">Hinzufügen</button>`);
 }
 
 function setAuthMode(mode) {
@@ -207,13 +246,7 @@ async function start() {
   startGPS();
   await loadFeed();
   const add = lsGet('pendingAdd');
-  if (add) {
-    lsSet('pendingAdd', null);
-    if (add.toLowerCase() !== S.me.username.toLowerCase()) {
-      const res = await call('POST', '/api/friends/request', { username: add });
-      if (!res.error) toast(res.status === 'friends' ? `Du bist jetzt mit ${add} befreundet` : `Freundschaftsanfrage an ${add} gesendet`);
-    }
-  }
+  if (add) { lsSet('pendingAdd', null); addInvite(add); }
 }
 
 async function logout(expired = false) {
@@ -995,7 +1028,8 @@ async function loadFriends() {
   const body = $('friends-body');
   const r = await api('GET', '/api/friends');
   if (r.error) { body.innerHTML = `<div class="empty">${esc(r.error)}</div>`; return; }
-  let h = `<button class="invite" data-act="invite">${ICON.share}<span class="grow"><b>Freunde einladen</b><small>Link schicken – wer ihn öffnet, wird automatisch dein Freund</small></span></button>`;
+  let h = `<button class="invite" data-act="invite">${ICON.share}<span class="grow"><b>Freunde einladen</b><small>Link schicken – wer ihn öffnet, wird automatisch dein Freund</small></span></button>
+    <button class="btn ghost" style="margin-top:10px" data-act="paste-invite">Einladung einfügen</button>`;
   if (r.incoming.length) {
     h += `<div class="section"><div class="section-h"><span>Anfragen</span><span>${r.incoming.length}</span></div>`;
     h += r.incoming.map(u => `<div class="row">${av(u, 44)}<div class="grow"><b class="ell">${esc(u.username)}</b><small>möchte mit dir befreundet sein</small></div>
@@ -1186,6 +1220,13 @@ const ACT = {
     if (!r.error) loadMoney();
   }),
   invite: () => invite(),
+  'paste-invite': () => pasteInvite(),
+  'invite-submit': () => addInvite(parseInvite($('invite-input').value)),
+  'copy-invite': async () => {
+    const url = `${location.origin}/?add=${encodeURIComponent(lsGet('pendingAdd') || '')}`;
+    try { await navigator.clipboard.writeText(url); toast('Kopiert – jetzt Tanki öffnen und bei Freunde einfügen'); }
+    catch { toast('Kopieren nicht möglich – such in der App einfach nach dem Namen', 'err'); }
+  },
   'f-add': async el => {
     const r = await call('POST', '/api/friends/request', { userId: +el.dataset.uid });
     if (r.error) return;
