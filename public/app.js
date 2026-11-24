@@ -1338,7 +1338,7 @@ async function loadFriends() {
   }
   h += `<div class="section"><div class="section-h"><span>Deine Freunde</span><span>${r.friends.length || ''}</span></div>`;
   h += r.friends.length
-    ? r.friends.map(u => `<div class="row">${av(u, 44)}<div class="grow"><b class="ell">${esc(u.username)}</b><small>${u.active_ride ? '<span style="color:var(--ac)">fährt gerade</span>' : u.role === 'driver' ? 'Fahrer' : 'Mitfahrer'}</small></div>
+    ? r.friends.map(u => `<div class="row tap" data-act="user" data-uid="${u.id}">${av(u, 44)}<div class="grow"><b class="ell">${esc(u.username)}</b><small>${u.active_ride ? '<span style="color:var(--ac)">fährt gerade</span>' : u.role === 'driver' ? 'Fahrer' : 'Mitfahrer'}</small></div>
         ${u.active_ride ? `<button class="pill" data-act="ride" data-id="${u.active_ride}">Ansehen</button>` : ''}
         <button class="x-btn" data-act="f-remove" data-uid="${u.id}" data-name="${esc(u.username)}" aria-label="Entfernen">${ICON.x}</button></div>`).join('')
     : '<div class="empty">Noch keine Freunde. Such oben nach einem Nutzernamen oder schick deinen Einladungslink.</div>';
@@ -1389,6 +1389,7 @@ function renderProfile() {
   const notifOn = 'Notification' in window && Notification.permission === 'granted';
   let h = `<div class="prof-head"><button class="prof-av" data-act="avatar">${av(m, 76)}<i>${ICON.pen}</i></button>
       <div><h2>${esc(m.username)}</h2><span class="mu">${m.role === 'driver' ? 'Fahrer' : 'Mitfahrer'}</span></div></div>
+    <button class="invite" data-act="user" data-uid="${m.id}">${ICON.car}<span class="grow"><b>Meine Statistik</b><small>Fahrten, Kilometer, Rekorde und Abzeichen</small></span>${ICON.chev}</button>
     <div class="card"><div class="card-h">Wie bist du unterwegs?</div><div style="height:10px"></div>
       <div class="seg"><button class="${m.role === 'driver' ? 'on' : ''}" data-act="role" data-role="driver">Ich fahre</button><button class="${m.role !== 'driver' ? 'on' : ''}" data-act="role" data-role="passenger">Ich fahre mit</button></div>
       <p class="note">${m.role === 'driver' ? 'Deine Fahrten starten automatisch, sobald du schneller als 20 km/h fährst. Sitzt du bei einem Freund im Auto, fragt die App stattdessen, ob du mitfährst.' : 'Du startest keine eigenen Fahrten. Fährst du neben einem Freund her, der eine Fahrt hat, fragt dich die App, ob du mitfährst.'}</p>`;
@@ -1531,11 +1532,82 @@ async function allUsersSheet() {
       ${label[u.status] || `<button class="pill" data-act="f-add" data-uid="${u.id}">${u.status === 'received' ? 'Annehmen' : 'Hinzufügen'}</button>`}</div>`).join('') || '<div class="empty">Außer dir ist noch niemand angemeldet.</div>'}`);
 }
 
+// ── User profile & stats ──────────────────────────────────────────────────────
+const DAYS = ['Sonntag', 'Montag', 'Dienstag', 'Mittwoch', 'Donnerstag', 'Freitag', 'Samstag'];
+
+async function openUser(id) {
+  $('user').hidden = false;
+  $('user-body').innerHTML = '<div class="empty">Lädt …</div>';
+  const st = await api('GET', `/api/users/${id}/stats`);
+  if (st.error) { $('user-body').innerHTML = `<div class="empty">${esc(st.error)}</div>`; return; }
+  $('user-body').innerHTML = statsPage(st);
+}
+
+function statsPage(st) {
+  const u = st.user, d = st.driven, r = st.ridden, self = isMe(u);
+  const rides = d.n + r.n, km = d.km + r.km, secs = d.secs + r.secs;
+  const tile = (v, unit, label, hi) => `<div class="stat${hi ? ' hi' : ''}"><b>${v}<small>${unit}</small></b><span>${label}</span></div>`;
+  const h = st.hours;
+  const slot = h.length ? (() => {
+    const c = { Morgens: 0, Mittags: 0, Abends: 0, Nachts: 0 };
+    h.forEach(x => { c[x >= 5 && x < 11 ? 'Morgens' : x >= 11 && x < 17 ? 'Mittags' : x >= 17 && x < 22 ? 'Abends' : 'Nachts']++; });
+    return Object.entries(c).sort((a, b) => b[1] - a[1])[0][0];
+  })() : null;
+  const night = h.filter(x => x >= 22 || x < 5).length;
+  const since = new Date(u.since * 1000).toLocaleDateString('de-DE', { month: 'long', year: 'numeric' });
+
+  const badges = [
+    [km >= 100, '100-km-Club', 'Über 100 km unterwegs'],
+    [km >= 1000, 'Tausender', 'Über 1.000 km unterwegs'],
+    [rides >= 10, 'Stammgast', '10 Fahrten oder mehr'],
+    [st.carried.n >= 10, 'Taxi', '10+ Mitfahrer mitgenommen'],
+    [night >= 3, 'Nachteule', '3+ Fahrten nach 22 Uhr'],
+    [Math.max(d.longest, r.longest) >= 200, 'Roadtrip', 'Eine Fahrt über 200 km'],
+    [st.topSpeed >= 200, 'Raser', 'Über 200 km/h gemessen'],
+  ].filter(b => b[0]);
+
+  let html = `<div class="prof-head">${av(u, 76)}<div><h2>${esc(u.username)}</h2>
+      <span class="mu">${u.role === 'driver' ? 'Fahrer' : 'Mitfahrer'} · dabei seit ${since}</span>
+      ${u.car ? `<div class="mu" style="font-size:13px;margin-top:2px">${ICON.car.replace('<svg', '<svg style="width:14px;height:14px;vertical-align:-2px"')} ${esc(u.car)}</div>` : ''}</div></div>`;
+
+  if (st.together) {
+    const t = st.together;
+    html += `<div class="card"><div class="card-h">${self ? '' : 'Ihr zusammen'}</div><div style="height:10px"></div>
+      <div class="stats">${tile(t.n, '', 'Fahrten', true)}${tile(kmNum(t.km), 'km', 'Strecke')}
+      ${tile(t.net === 0 ? '0' : dec(Math.abs(t.net), 2), '€', t.net > 0 ? 'schuldet dir' : t.net < 0 ? 'du schuldest' : 'ausgeglichen')}</div>
+      ${t.recent.map(x => `<div class="row tap" data-act="ride" data-id="${x.id}"><div class="grow"><b class="ell">${x.name ? esc(x.name) : x.driver_is_them ? `${esc(u.username)} ist gefahren` : 'Du bist gefahren'}</b><small>${dateStr(x.started_at)} · ${kmNum(x.km)} km</small></div>${ICON.chev}</div>`).join('')
+      || '<div class="empty">Noch keine gemeinsame Fahrt.</div>'}</div>`;
+  }
+
+  html += `<div class="card"><div class="card-h">Gesamt</div><div style="height:10px"></div>
+    <div class="stats">${tile(rides, '', 'Fahrten', true)}${tile(kmNum(km), 'km', 'Strecke')}${secs < 3600 ? tile(Math.round(secs / 60), 'min', 'im Auto') : tile(dec(secs / 3600, secs < 36000 ? 1 : 0), 'h', 'im Auto')}</div>
+    <div class="stats">${tile(kmNum(Math.max(d.longest, r.longest)), 'km', 'Längste Fahrt')}${tile(st.topSpeed ? Math.round(st.topSpeed) : '–', 'km/h', 'Top-Speed')}${tile(rides ? kmNum(km / rides) : '0', 'km', 'Ø pro Fahrt')}</div></div>`;
+
+  html += `<div class="card"><div class="card-h">Als Fahrer</div><div style="height:10px"></div>
+    <div class="stats">${tile(d.n, '', 'Fahrten')}${tile(kmNum(d.km), 'km', 'gefahren')}${tile(st.carried.people, '', 'Leute mitgenommen')}</div>
+    <div class="stats">${tile(dec(d.fuel_eur, d.fuel_eur < 100 ? 2 : 0), '€', 'Spritkosten')}${tile(dec(d.liters, d.liters < 100 ? 1 : 0), 'l', 'verbraucht')}${tile(d.km > 0 ? dec(d.liters / d.km * 100) : '–', 'l', 'Ø /100 km')}</div></div>`;
+
+  html += `<div class="card"><div class="card-h">Als Mitfahrer</div><div style="height:10px"></div>
+    <div class="stats">${tile(r.n, '', 'Fahrten')}${tile(kmNum(r.km), 'km', 'mitgefahren')}${tile(dec(r.paid_eur, r.paid_eur < 100 ? 2 : 0), '€', 'Spritanteil')}</div></div>`;
+
+  if (rides) {
+    html += `<div class="card"><div class="card-h">Gewohnheiten</div>
+      ${st.days[0] ? `<div class="row"><div class="grow"><b>Lieblingstag</b><small>${st.days[0].c} von ${rides} ${rides === 1 ? 'Fahrt' : 'Fahrten'}</small></div><b>${DAYS[+st.days[0].d]}</b></div>` : ''}
+      ${slot ? `<div class="row"><div class="grow"><b>Meist unterwegs</b><small>nach Startzeit</small></div><b>${slot}</b></div>` : ''}
+      ${st.buddy ? `<div class="row tap" data-act="user" data-uid="${st.buddy.id}">${av(st.buddy, 36)}<div class="grow"><b>${esc(st.buddy.username)}</b><small>Am häufigsten zusammen · ${st.buddy.count} ${st.buddy.count === 1 ? 'Fahrt' : 'Fahrten'}</small></div>${ICON.chev}</div>` : ''}
+    </div>`;
+  }
+
+  html += `<div class="card"><div class="card-h">Abzeichen</div>
+    ${badges.length ? `<div class="badges">${badges.map(b => `<div class="badge-item"><b>${b[1]}</b><small>${b[2]}</small></div>`).join('')}</div>` : '<div class="empty">Noch keine – einfach mehr fahren.</div>'}</div>`;
+  return html;
+}
+
 // ── Event delegation ──────────────────────────────────────────────────────────
 const ACT = {
   'auth-mode': el => setAuthMode(el.dataset.mode),
   'auth-role': el => { S.authRole = el.dataset.role; document.querySelectorAll('.role-opt').forEach(b => b.classList.toggle('on', b === el)); },
-  tab: el => { closeDetail(); $('profile').hidden = true; showTab(el.dataset.tab); },
+  tab: el => { closeDetail(); $('profile').hidden = true; $('user').hidden = true; showTab(el.dataset.tab); },
   close: () => closeSheet(),
   'confirm-yes': async () => { const f = S.confirmFn; S.confirmFn = null; closeSheet(); await f?.(); },
   locate: () => { S.follow = true; if (S.pos) centerOn(S.pos.lat, S.pos.lng, 16); else toast('Noch kein GPS-Signal'); },
@@ -1596,6 +1668,8 @@ const ACT = {
     if (!r.error) loadMoney();
   }),
   invite: () => invite(),
+  user: el => openUser(+el.dataset.uid),
+  'user-close': () => { $('user').hidden = true; },
   'all-users': () => allUsersSheet(),
   'cons-mode': el => saveMe({ cons_mode: el.dataset.mode }),
   'car-pick': () => carPickSheet(),

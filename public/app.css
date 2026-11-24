@@ -373,3 +373,10 @@ sup { font-size: .6em; vertical-align: .45em; margin-left: 1px; }
 .score small { font-size: 10px; }
 .d-title { display: flex; align-items: center; gap: 8px; }
 .d-title .rename { flex-shrink: 0; background: var(--s2); }
+#user { z-index: 920; }
+#detail { z-index: 940; }
+.badges { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.badge-item { background: var(--ac-soft); border-radius: 12px; padding: 10px 12px; }
+.badge-item b { display: block; color: var(--ac); font: 800 17px/1.1 'Barlow Condensed', sans-serif; text-transform: uppercase; }
+.badge-item small { color: var(--mu); font-size: 12px; }
+.card .stats:last-child { margin-bottom: 0; }

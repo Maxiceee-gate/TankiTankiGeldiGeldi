@@ -733,6 +733,69 @@ route('GET', '/api/users', true, ({ user }) => {
   };
 });
 
+route('GET', '/api/users/:id/stats', true, ({ user, params }) => {
+  const u = q.userById.get(params.id) || fail(404, 'Nutzer nicht gefunden.');
+  const self = u.id === user.id;
+  if (!self && !isFriend(user.id, u.id)) fail(403, 'Nur Profile von Freunden sind sichtbar.');
+  const one = (sql, ...a) => db.prepare(sql).get(...a);
+
+  const driven = one(`
+    SELECT COUNT(*) AS n, COALESCE(SUM(total_distance), 0) AS km, COALESCE(SUM(ended_at - started_at), 0) AS secs,
+      COALESCE(MAX(total_distance), 0) AS longest,
+      COALESCE(SUM(CASE WHEN fuel_price IS NOT NULL THEN total_distance * consumption / 100 * fuel_price END), 0) AS fuel_eur,
+      COALESCE(SUM(total_distance * consumption / 100), 0) AS liters
+    FROM rides WHERE driver_id = ? AND status = 'ended'`, u.id);
+  const ridden = one(`
+    SELECT COUNT(*) AS n, COALESCE(SUM(COALESCE(p.to_km, r.total_distance) - COALESCE(p.from_km, 0)), 0) AS km,
+      COALESCE(SUM(r.ended_at - r.started_at), 0) AS secs, COALESCE(SUM(p.share_eur), 0) AS paid_eur,
+      COALESCE(MAX(COALESCE(p.to_km, r.total_distance) - COALESCE(p.from_km, 0)), 0) AS longest
+    FROM ride_participants p JOIN rides r ON r.id = p.ride_id WHERE p.user_id = ? AND r.status = 'ended'`, u.id);
+  const carried = one(`
+    SELECT COUNT(*) AS n, COUNT(DISTINCT COALESCE(p.user_id, 'g' || p.guest_name)) AS people
+    FROM ride_participants p JOIN rides r ON r.id = p.ride_id WHERE r.driver_id = ? AND r.status = 'ended'`, u.id);
+  const topSpeed = one(`
+    SELECT COALESCE(MAX(g.speed), 0) AS v FROM gps_points g JOIN rides r ON r.id = g.ride_id
+    WHERE r.status = 'ended' AND g.speed < 260 AND (r.driver_id = ? OR r.id IN (SELECT ride_id FROM ride_participants WHERE user_id = ? AND COALESCE(from_km, 0) = 0 AND to_km IS NULL))`, u.id, u.id).v;
+
+  const involved = `SELECT id, started_at FROM rides WHERE status = 'ended' AND (driver_id = @u OR id IN (SELECT ride_id FROM ride_participants WHERE user_id = @u))`;
+  const days = db.prepare(`SELECT strftime('%w', started_at, 'unixepoch', 'localtime') AS d, COUNT(*) AS c FROM (${involved}) GROUP BY d ORDER BY c DESC`).all({ u: u.id });
+  const hours = db.prepare(`SELECT CAST(strftime('%H', started_at, 'unixepoch', 'localtime') AS INTEGER) AS h FROM (${involved})`).all({ u: u.id }).map(r => r.h);
+
+  const buddy = one(`
+    SELECT other, COUNT(*) AS c FROM (
+      SELECT p.user_id AS other FROM ride_participants p JOIN rides r ON r.id = p.ride_id WHERE r.driver_id = @u AND r.status = 'ended' AND p.user_id IS NOT NULL
+      UNION ALL SELECT r.driver_id FROM ride_participants p JOIN rides r ON r.id = p.ride_id WHERE p.user_id = @u AND r.status = 'ended'
+      UNION ALL SELECT p2.user_id FROM ride_participants p JOIN ride_participants p2 ON p2.ride_id = p.ride_id AND p2.user_id != @u
+        JOIN rides r ON r.id = p.ride_id WHERE p.user_id = @u AND r.status = 'ended' AND p2.user_id IS NOT NULL
+    ) GROUP BY other ORDER BY c DESC LIMIT 1`, { u: u.id });
+
+  let together = null;
+  if (!self) {
+    const shared = db.prepare(`
+      SELECT r.* FROM rides r WHERE r.status = 'ended' AND (
+        (r.driver_id = @a AND EXISTS (SELECT 1 FROM ride_participants WHERE ride_id = r.id AND user_id = @b)) OR
+        (r.driver_id = @b AND EXISTS (SELECT 1 FROM ride_participants WHERE ride_id = r.id AND user_id = @a)) OR
+        (EXISTS (SELECT 1 FROM ride_participants WHERE ride_id = r.id AND user_id = @a) AND EXISTS (SELECT 1 FROM ride_participants WHERE ride_id = r.id AND user_id = @b)))
+      ORDER BY r.started_at DESC`).all({ a: user.id, b: u.id });
+    const owedToMe = one(`SELECT COALESCE(SUM(p.share_eur), 0) AS v FROM ride_participants p JOIN rides r ON r.id = p.ride_id
+      WHERE r.driver_id = ? AND p.user_id = ? AND r.status = 'ended' AND p.paid_at IS NULL`, user.id, u.id).v;
+    const iOwe = one(`SELECT COALESCE(SUM(p.share_eur), 0) AS v FROM ride_participants p JOIN rides r ON r.id = p.ride_id
+      WHERE r.driver_id = ? AND p.user_id = ? AND r.status = 'ended' AND p.paid_at IS NULL`, u.id, user.id).v;
+    together = {
+      n: shared.length, km: shared.reduce((x, r) => x + (r.total_distance || 0), 0), net: r2(owedToMe - iOwe),
+      recent: shared.slice(0, 5).map(r => ({ id: r.id, name: r.name, started_at: r.started_at, km: r.total_distance, driver_is_them: r.driver_id === u.id })),
+    };
+  }
+
+  const buddyUser = buddy ? q.userById.get(buddy.other) : null;
+  return {
+    user: { ...pub(u), role: u.role, since: u.created_at, car: carLabel(CAR_BY_ID.get(u.car_id)) || u.car_name || null },
+    driven, ridden, carried, topSpeed, days, hours,
+    buddy: buddyUser ? { ...pub(buddyUser), count: buddy.c } : null,
+    together,
+  };
+});
+
 route('GET', '/api/cars', false, () => ({ cars: CARS }));
 
 route('POST', '/api/friends/request', true, ({ user, body }) => {
