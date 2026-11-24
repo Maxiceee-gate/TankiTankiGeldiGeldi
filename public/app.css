@@ -196,7 +196,8 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .home-sheet.sized { max-height: none; }
 #home-body { flex: 1; min-height: 0; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 0 max(16px, var(--sr)) 16px max(16px, var(--sl)); }
 .grab { width: 40px; height: 5px; border-radius: 3px; background: var(--s3); margin: 4px auto 12px; }
-.grab-zone { flex-shrink: 0; padding: 8px 0 2px; touch-action: none; cursor: grab; }
+.grab-zone { flex-shrink: 0; padding: 8px 0 2px; cursor: grab; }
+#home-body, .detail-body { overscroll-behavior: contain; }
 .grab-zone .grab { margin: 0 auto 8px; width: 44px; }
 .anim { transition: height .28s cubic-bezier(.2, .9, .3, 1); }
 

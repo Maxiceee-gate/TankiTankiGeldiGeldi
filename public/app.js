@@ -825,7 +825,49 @@ function makeDraggable(sheet, snaps, onSnap) {
     sheet.style.height = h + 'px';
     if (anim) setTimeout(() => onSnap?.(h), 300);
   };
+  // Touch: drag from anywhere. Up expands until full, then content scrolls; down collapses once content is at the top.
+  const body = sheet.querySelector('#home-body, .detail-body');
+  let mode = null, tStartY = 0, tH = 0, onZone = false;
+  sheet.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1 || e.target.closest('.chart, input, select, textarea')) { mode = 'off'; return; }
+    mode = null; onZone = !!e.target.closest('.grab-zone');
+    tStartY = lastY = e.touches[0].clientY; lastT = e.timeStamp; vel = 0;
+    tH = sheet.offsetHeight;
+  }, { passive: true });
+  sheet.addEventListener('touchmove', e => {
+    if (mode === 'off' || mode === 'scroll') return;
+    const y = e.touches[0].clientY, dy = tStartY - y;
+    if (mode === null) {
+      if (Math.abs(dy) < 6) return;
+      const s = snaps();
+      const atMax = sheet.offsetHeight >= s[s.length - 1] - 2;
+      mode = onZone || (dy > 0 && !atMax) || (dy < 0 && body.scrollTop <= 0) ? 'drag' : 'scroll';
+      if (mode === 'scroll') return;
+      tStartY = y; tH = sheet.offsetHeight;
+    }
+    e.preventDefault();
+    const s = snaps();
+    vel = (lastY - y) / Math.max(e.timeStamp - lastT, 1);
+    lastY = y; lastT = e.timeStamp;
+    setH(Math.min(Math.max(tH + tStartY - y, s[0] - 40), s[s.length - 1]), false);
+  }, { passive: false });
+  sheet.addEventListener('touchend', e => {
+    if (mode === 'drag') { moved = true; snapTo(); }
+    else if (mode === null && onZone) { moved = false; snapTo(); e.preventDefault(); }
+    mode = null;
+  });
+  const snapTo = () => {
+    const s = snaps(), h = sheet.offsetHeight;
+    let target;
+    if (!moved) target = h >= s[s.length - 1] - 10 ? s[1] : s[s.length - 1];
+    else if (Math.abs(vel) > 0.5) target = vel > 0 ? s.find(x => x > h + 10) ?? s[s.length - 1] : [...s].reverse().find(x => x < h - 10) ?? s[0];
+    else target = s.reduce((x, y) => Math.abs(y - h) < Math.abs(x - h) ? y : x);
+    setH(target, true);
+  };
+
+  // Mouse: drag via the handle
   zone.addEventListener('pointerdown', e => {
+    if (e.pointerType === 'touch') return;
     zone.setPointerCapture(e.pointerId);
     startY = lastY = e.clientY; lastT = e.timeStamp; vel = 0; moved = false;
     startH = sheet.offsetHeight;
@@ -844,12 +886,7 @@ function makeDraggable(sheet, snaps, onSnap) {
   const end = e => {
     if (!zone.hasPointerCapture(e.pointerId)) return;
     zone.releasePointerCapture(e.pointerId);
-    const s = snaps(), h = sheet.offsetHeight;
-    let target;
-    if (!moved) target = h >= s[s.length - 1] - 10 ? s[1] : s[s.length - 1];
-    else if (Math.abs(vel) > 0.5) target = vel > 0 ? s.find(x => x > h + 10) ?? s[s.length - 1] : [...s].reverse().find(x => x < h - 10) ?? s[0];
-    else target = s.reduce((a, b) => Math.abs(b - h) < Math.abs(a - h) ? b : a);
-    setH(target, true);
+    snapTo();
   };
   zone.addEventListener('pointerup', end);
   zone.addEventListener('pointercancel', end);
