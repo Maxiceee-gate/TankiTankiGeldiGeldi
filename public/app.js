@@ -13,8 +13,8 @@ const FUEL = {
   elektro: { label: 'Elektro', unit: 'kWh', cons: 18 },
 };
 const COLORS = ['#C8F03C', '#5CE1E6', '#FF8A5B', '#B69CFF', '#FFD25E', '#6EE7A8', '#FF6B9A', '#7AA7FF'];
-const TILES = 'https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png';
-const ATTR = '© <a href="https://www.openstreetmap.org/copyright">OSM</a> © <a href="https://carto.com/attributions">CARTO</a>';
+const TILES = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
+const ATTR = '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>';
 
 // ── State ─────────────────────────────────────────────────────────────────────
 const S = {
@@ -412,7 +412,7 @@ function rideRow(r) {
 function initMap() {
   if (S.map || !window.L) return;
   S.map = L.map('map', { zoomControl: false, attributionControl: true }).setView([51.16, 10.45], 6);
-  L.tileLayer(TILES, { attribution: ATTR, maxZoom: 19, subdomains: 'abcd' }).addTo(S.map);
+  L.tileLayer(TILES, { attribution: ATTR, maxZoom: 19 }).addTo(S.map);
   S.map.on('dragstart', () => { S.follow = false; });
 }
 
@@ -794,7 +794,7 @@ function drawDetailMap() {
   if (!window.L) return;
   if (!S.dmap) {
     S.dmap = L.map('detail-map', { zoomControl: false, attributionControl: true });
-    L.tileLayer(TILES, { attribution: ATTR, maxZoom: 19, subdomains: 'abcd' }).addTo(S.dmap);
+    L.tileLayer(TILES, { attribution: ATTR, maxZoom: 19 }).addTo(S.dmap);
     S.dlayer = L.layerGroup().addTo(S.dmap);
   }
   S.dmap.invalidateSize();
