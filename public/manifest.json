@@ -3,7 +3,7 @@
   "short_name": "Tanki",
   "description": "Spritkosten mit Freunden teilen",
   "start_url": "/",
-  "display": "standalone",
+  "display": "fullscreen",
   "background_color": "#CFC4AC",
   "theme_color": "#C95B18",
   "orientation": "portrait",

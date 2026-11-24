@@ -547,6 +547,9 @@ function checkAutoRide(speedKmh, lat, lng) {
 
   const recent = S.speedHistory.filter(e => now - e.t < AUTO_SPEED_SECS * 1000);
   if (recent.length < 3) return;
+  // Require data spanning at least 25 seconds to avoid false triggers on startup
+  const timeSpan = recent[recent.length - 1].t - recent[0].t;
+  if (timeSpan < 25000) return;
   const allFast = recent.every(e => e.speed >= AUTO_SPEED_KMH);
   if (allFast) {
     S.speedHistory = [];
