@@ -53,9 +53,14 @@
   <header class="topbar">
     <button id="btn-profile" class="top-av" data-act="profile" aria-label="Profil"></button>
     <div id="gps-chip" class="chip warn">GPS startet …</div>
+    <div class="top-right">
+    <button class="round-btn" id="btn-stations" data-act="stations-toggle" aria-label="Tankstellen anzeigen">
+      <svg viewBox="0 0 24 24"><path d="M4 21V5a2 2 0 0 1 2-2h6a2 2 0 0 1 2 2v16M3 21h12M4 10h10"/><path d="M14 8h2a2 2 0 0 1 2 2v6a1.5 1.5 0 0 0 3 0V9l-3-3"/></svg>
+    </button>
     <button class="round-btn" data-act="locate" aria-label="Auf mich zentrieren">
       <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.2"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="7.5"/></svg>
     </button>
+    </div>
   </header>
   <div id="home-sheet" class="home-sheet"><div class="grab-zone"><div class="grab"></div></div><div id="home-body"></div></div>
 </section>

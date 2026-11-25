@@ -186,7 +186,7 @@ function boot() {
   const qs = new URLSearchParams(location.search);
   const add = qs.get('add');
   if (add) lsSet('pendingAdd', add);
-  S.deepLink = qs.get('ride') || qs.get('plan') || qs.get('tab') ? new URLSearchParams(qs) : null;
+  S.deepLink = qs.get('ride') || qs.get('plan') || qs.get('tab') || qs.get('stations') ? new URLSearchParams(qs) : null;
   if (location.search) history.replaceState(null, '', '/');
   navigator.serviceWorker?.addEventListener('message', e => { if (e.data?.type === 'open') openDeepLink(new URL(e.data.url, location.origin).searchParams); });
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
@@ -310,6 +310,7 @@ function openDeepLink(qs) {
   if (!S.me) { S.deepLink = qs; return; }
   if (qs.get('ride')) openDetail(+qs.get('ride'));
   else if (qs.get('plan')) openPlan(+qs.get('plan'));
+  else if (qs.get('stations')) { closeDetail(); showTab('home'); toggleStations(true); }
   else if (qs.get('tab')) { closeDetail(); $('profile').hidden = true; $('user').hidden = true; showTab(qs.get('tab')); }
 }
 
@@ -552,6 +553,7 @@ function idleCard() {
     return `<div class="hello"><h2>Hi ${name}</h2><p>${sub}</p></div>
       <button class="btn" data-act="start">${ICON.car} Fahrt jetzt starten</button>
       <button class="btn ghost" data-act="plan-new">Fahrt planen & Freunde fragen</button>
+      ${S.me.fuel || S.me.tank_cap ? `<div class="people" style="display:block">${fuelGauge(S.me.fuel, true)}</div>` : ''}
       <button class="link" data-act="tanked">Gerade getankt? Preis aktualisieren (${S.me.default_price ? price(S.me.default_price, fuelUnit(myFuel())).replace(/<\/?sup>/g, '') : 'fehlt'})</button>`;
   }
   return `<div class="hello"><h2>Hi ${name}</h2><p>Sobald ein Freund losfährt, siehst du ihn hier und auf der Karte. Mit einem Tipp fährst du mit – sitzt du schon im Auto, fragt dich die App von selbst.</p></div>
@@ -1538,14 +1540,17 @@ function renderProfile() {
       <div class="seg"><button class="${m.cons_mode !== 'car' ? 'on' : ''}" data-act="cons-mode" data-mode="manual">Manuell</button><button class="${m.cons_mode === 'car' ? 'on' : ''}" data-act="cons-mode" data-mode="car">Aus Datenbank</button></div>`;
     if (m.cons_mode === 'car') {
       h += `<button class="row tap" style="width:100%;text-align:left" data-act="car-pick">${ICON.car}<div class="grow"><b>${car ? esc(`${car.brand} ${car.model}`) : 'Auto auswählen'}</b><small>${car ? esc(car.engine) + ' · ' + FUEL[car.fuel].label : 'Marke, Modell und Motor'}</small></div>${ICON.chev}</button>
-        ${car ? `<div class="cost-meta" style="margin-top:0"><span>Stadt <b>${dec(car.city)}</b></span><span>Land <b>${dec(car.rural)}</b></span><span>Autobahn <b>${dec(car.motorway)}</b> l/100 km</span></div>` : ''}
+        ${car ? `<div class="cost-meta" style="margin-top:0"><span>Stadt <b>${dec(car.city)}</b></span><span>Land <b>${dec(car.rural)}</b></span><span>Autobahn <b>${dec(car.motorway)}</b> l/100 km</span><span>Tank <b>${car.tank} l</b></span></div>` : ''}
         <p class="note">Der Verbrauch wird pro Abschnitt aus deinem tatsächlich gefahrenen Tempo berechnet – Stadtverkehr, Landstraße und Autobahn zählen unterschiedlich. Die Werte sind Praxis-Schätzungen.</p>
         <label class="field"><span>Spritpreis</span><div class="unit-input"><input id="car-price" inputmode="decimal" placeholder="1,799" value="${m.default_price ? String(m.default_price).replace('.', ',') : ''}"><em>€/${unit}</em></div></label>
         ${stationBtn(m.car.fuel)}
         <div style="height:14px"></div><button class="btn" data-act="save-car-price">Speichern</button>`;
     } else {
       h += `<label class="field"><span>Name (optional)</span><input id="car-name" maxlength="40" placeholder="z. B. Golf 7" value="${esc(m.car_name || '')}"></label>
-      <label class="field"><span>Kraftstoff</span><select id="car-type">${opts}</select></label>
+      <div class="field-row">
+        <label class="field"><span>Kraftstoff</span><select id="car-type">${opts}</select></label>
+        <label class="field"><span>Tankgröße</span><div class="unit-input"><input id="car-tank" inputmode="numeric" placeholder="50" value="${m.tank_l || ''}"><em>l</em></div></label>
+      </div>
       <div class="field-row">
         <label class="field"><span>Verbrauch</span><div class="unit-input"><input id="car-cons" inputmode="decimal" placeholder="${String(FUEL[m.fuel_type]?.cons || 7.5).replace('.', ',')}" value="${m.consumption ? String(m.consumption).replace('.', ',') : ''}"><em>/100 km</em></div></label>
         <label class="field"><span>Spritpreis</span><div class="unit-input"><input id="car-price" inputmode="decimal" placeholder="1,799" value="${m.default_price ? String(m.default_price).replace('.', ',') : ''}"><em>€/${unit}</em></div></label>
@@ -1559,6 +1564,7 @@ function renderProfile() {
         <div class="seg" style="width:150px"><button class="${m.petrol_grade !== 'e10' ? 'on' : ''}" data-act="grade" data-g="e5">E5</button><button class="${m.petrol_grade === 'e10' ? 'on' : ''}" data-act="grade" data-g="e10">E10</button></div></div>`;
     }
     h += `<p class="note">Zuletzt: ${lastFill()}</p>`;
+    h += `<div class="card-h" style="padding-top:10px">Tankstand</div>${fuelGauge(m.fuel, true)}`;
     h += '</div>';
   }
   h += `<div class="card"><div class="card-h">Zahlungsdaten</div>
@@ -1712,6 +1718,7 @@ function statsPage(st) {
       <span class="mu">${u.role === 'driver' ? 'Fahrer' : 'Mitfahrer'} · dabei seit ${since}</span>
       ${u.car ? `<div class="mu" style="font-size:13px;margin-top:2px">${ICON.car.replace('<svg', '<svg style="width:14px;height:14px;vertical-align:-2px"')} ${esc(u.car)}</div>` : ''}</div></div>`;
 
+  if (u.fuel) html += `<div class="card"><div class="card-h">Tank</div>${fuelGauge(u.fuel, false)}</div>`;
   if (st.together) {
     const t = st.together;
     html += `<div class="card"><div class="card-h">${self ? '' : 'Ihr zusammen'}</div><div style="height:10px"></div>
@@ -1768,7 +1775,82 @@ function tankSheet() {
     <p class="note" style="margin-top:-8px">Bisher: ${lastFill()}</p>
     <label class="field"><span>Preis</span><div class="unit-input"><input id="tank-price" inputmode="decimal" placeholder="1,799" value=""><em>€/${fuelUnit(myFuel())}</em></div></label>
     ${stationBtn(myFuel(), 'tank-price')}
+    <label class="check"><input type="checkbox" id="tank-full" checked onchange="document.getElementById('tank-liters-wrap').hidden=this.checked"> Vollgetankt</label>
+    <label class="field" id="tank-liters-wrap" hidden><span>Getankte Liter</span><div class="unit-input"><input id="tank-liters" inputmode="decimal" placeholder="z. B. 30"><em>l</em></div></label>
     <div style="height:14px"></div><button class="btn" data-act="tank-save">Speichern</button>`);
+}
+
+// ── Tank level ────────────────────────────────────────────────────────────────
+function fuelGauge(fuel, self) {
+  if (!fuel) {
+    return self ? `<div class="row tap" data-act="range"><div class="grow"><b>Tankstand unbekannt</b><small>Trag einmal die Reichweite aus dem Bordcomputer ein</small></div>${ICON.chev}</div>` : '';
+  }
+  const pct = fuel.pct != null ? fuel.pct : null;
+  const cls = fuel.range < 60 ? 'low' : fuel.range < 150 ? 'mid' : '';
+  return `<div ${self ? 'class="tap" data-act="range"' : ''} style="padding:6px 0">
+    <div style="display:flex;justify-content:space-between;align-items:baseline"><b>ca. ${dec(fuel.liters)} l im Tank</b><span class="mu">noch ~${fuel.range} km</span></div>
+    ${pct != null ? `<div class="gauge ${cls}"><i style="width:${Math.round(pct * 100)}%"></i></div>` : ''}
+    <small class="mu">Schätzung${fuel.cap ? ` · Tank ${fuel.cap} l` : ''}${self ? ' · tippen zum Korrigieren' : ''}</small></div>`;
+}
+
+function rangeSheet() {
+  openSheet(`<h3>Reichweite eintragen</h3><p>Schau in den Bordcomputer, wie viele Kilometer du noch fahren kannst. Die App rechnet daraus die Liter im Tank und zieht nach jeder Fahrt den Verbrauch ab.</p>
+    <label class="field"><span>Reichweite laut Auto</span><div class="unit-input"><input id="range-km" inputmode="numeric" placeholder="z. B. 420"><em>km</em></div></label>
+    <div style="height:14px"></div><button class="btn" data-act="range-save">Speichern</button>`);
+}
+
+// ── Fuel stations on the map ──────────────────────────────────────────────────
+const myGrade = () => myFuel() === 'diesel' ? 'diesel' : S.me.petrol_grade === 'e10' ? 'e10' : 'e5';
+const GRADE_LABEL = { e5: 'Super E5', e10: 'Super E10', diesel: 'Diesel' };
+S.stationById = new Map();
+S.stationLayer = null;
+
+function toggleStations(force) {
+  S.showStations = force ?? !S.showStations;
+  $('btn-stations').classList.toggle('on', S.showStations);
+  if (!S.map) return;
+  if (!S.showStations) { S.stationLayer?.remove(); S.stationLayer = null; return; }
+  S.stationLayer = L.layerGroup().addTo(S.map);
+  if (!S.stationHook) { S.stationHook = true; S.map.on('moveend', () => { clearTimeout(S.stTimer); S.stTimer = setTimeout(loadStationsOnMap, 400); }); }
+  loadStationsOnMap();
+}
+
+async function loadStationsOnMap() {
+  if (!S.showStations || !S.map) return;
+  if (S.map.getZoom() < 11) { S.stationLayer?.clearLayers(); return toast('Zoom etwas näher heran, um Tankstellen zu sehen'); }
+  const c = S.map.getCenter(), b = S.map.getBounds();
+  const rad = Math.min(25, Math.max(2, Math.ceil(b.getNorthEast().distanceTo(c) / 1000)));
+  const r = await api('GET', `/api/fuel/nearby?lat=${c.lat.toFixed(4)}&lng=${c.lng.toFixed(4)}&rad=${rad}`);
+  if (r.error) return toast(r.error, 'err');
+  if (!r.available) { toggleStations(false); return toast('Tankstellen sind erst verfügbar, wenn der Tankerkönig-Key eingerichtet ist', 'err'); }
+  const grade = myGrade();
+  const prices = r.stations.filter(s => s.open && s[grade]).map(s => s[grade]);
+  const min = prices.length ? Math.min(...prices) : null;
+  S.stationLayer.clearLayers();
+  for (const st of r.stations) {
+    S.stationById.set(st.id, st);
+    const p = st[grade];
+    const label = !st.open ? 'zu' : p ? p.toFixed(3).replace('.', ',').slice(0, -1) + toSup(p) : '–';
+    const cls = !st.open ? 'closed' : p && p === min ? 'cheap' : '';
+    L.marker([st.lat, st.lng], { icon: L.divIcon({ className: '', iconSize: [0, 0], html: `<div class="st-pin"><b class="${cls}">${label}</b><i></i></div>` }) })
+      .on('click', () => stationSheet(st.id)).addTo(S.stationLayer);
+  }
+}
+const toSup = p => ({ 0: '⁰', 1: '¹', 2: '²', 3: '³', 4: '⁴', 5: '⁵', 6: '⁶', 7: '⁷', 8: '⁸', 9: '⁹' })[Math.round(p * 1000) % 10];
+
+function stationSheet(id) {
+  const st = S.stationById.get(id);
+  if (!st) return;
+  const grade = myGrade();
+  const d = S.pos ? meters(S.pos, st) / 1000 : st.dist;
+  const nav = isIOS ? `https://maps.apple.com/?daddr=${st.lat},${st.lng}` : `https://www.google.com/maps/dir/?api=1&destination=${st.lat},${st.lng}`;
+  openSheet(`<h3>${esc(st.name)}</h3><p>${esc(st.street)}, ${esc(st.postCode || '')} ${esc(st.place || '')}<br>
+      <span style="color:${st.open ? 'var(--ac)' : 'var(--red)'}">${st.open ? 'Geöffnet' : 'Geschlossen'}</span> · ${dec(d)} km entfernt</p>
+    <div class="price-grid">${['e5', 'e10', 'diesel'].map(g => `<div class="stat${g === grade ? ' hi' : ''}"><b style="font-size:20px">${st[g] ? price(st[g], 'l').replace(' €/l', '') : '–'}</b><span>${GRADE_LABEL[g]}</span></div>`).join('')}</div>
+    ${st.fullName && st.fullName !== st.name ? `<p class="note">${esc(st.fullName)}</p>` : ''}
+    <a class="btn" href="${nav}" target="_blank" rel="noopener">Route dorthin</a>
+    <button class="btn ghost" data-act="station-tanked" data-id="${esc(st.id)}">Hier getankt</button>
+    <p class="note">Preise: Tankerkönig (MTS-K), CC BY 4.0 · höchstens 10 Minuten alt</p>`);
 }
 
 // ── Fuel stations nearby (Tankerkönig) ───────────────────────────────────────
@@ -1788,7 +1870,7 @@ async function showStations(el) {
   if (r.error) { box.innerHTML = `<div class="empty">${esc(r.error)}</div>`; return; }
   if (!r.available) { box.innerHTML = '<div class="empty">Die Tankstellenliste ist noch nicht freigeschaltet – trag den Preis bitte von Hand ein.</div>'; return; }
   const grade = fuel === 'diesel' ? 'diesel' : S.me.petrol_grade === 'e10' ? 'e10' : 'e5';
-  const list = r.stations.filter(st => st[grade]);
+  const list = r.stations.filter(st => st.open && st[grade]);
   box.innerHTML = list.length ? list.map((st, i) => `<button class="row tap" style="width:100%;text-align:left" data-act="station-pick" data-i="${i}" data-target="${el.dataset.target}">
       <div class="grow"><b class="ell">${esc(st.name)}</b><small class="ell">${esc(st.street || st.place || '')} · ${dec(st.dist)} km</small></div>
       <div class="amount" style="font-size:18px">${price(st[grade], 'l')}</div></button>`).join('') + '<p class="note">Preise: Tankerkönig (MTS-K), CC BY 4.0</p>'
@@ -1936,8 +2018,29 @@ const ACT = {
   'tank-save': async () => {
     const v = $('tank-price').value.trim();
     if (!v) return toast('Bitte einen Preis eintragen', 'err');
-    const r = await saveMe(withNote({ default_price: v }), 'Neuer Spritpreis gespeichert');
+    const patch = withNote({ default_price: v });
+    if ($('tank-full').checked) { if (S.me.tank_cap) patch.fuel_full = true; }
+    else if ($('tank-liters').value.trim()) patch.fuel_added = $('tank-liters').value.trim();
+    const r = await saveMe(patch, 'Getankt – Preis und Tankstand gespeichert');
     if (!r.error) closeSheet();
+  },
+  range: () => rangeSheet(),
+  'range-save': async () => {
+    const v = $('range-km').value.trim();
+    if (!v) return toast('Bitte die Reichweite eintragen', 'err');
+    const r = await saveMe({ range_km: v }, 'Tankstand gespeichert');
+    if (!r.error) closeSheet();
+  },
+  'stations-toggle': () => toggleStations(),
+  station: el => stationSheet(el.dataset.id),
+  'station-tanked': el => {
+    const st = S.stationById.get(el.dataset.id), grade = myGrade();
+    closeSheet();
+    tankSheet();
+    if (st && st[grade]) {
+      $('tank-price').value = String(st[grade]).replace('.', ',');
+      S.stationPick = { value: $('tank-price').value, note: `${st.name}, ${st.street || st.place} (Tankerkönig)` };
+    }
   },
   'save-pay': () => saveMe({ revolut: $('pay-revolut').value, iban: $('pay-iban').value, account_name: $('pay-name').value }, 'Zahlungsdaten gespeichert'),
   copy: async el => {
@@ -1990,7 +2093,7 @@ const ACT = {
   role: el => saveMe({ role: el.dataset.role }),
   'save-car': () => saveMe({
     car_name: $('car-name').value, fuel_type: $('car-type').value,
-    consumption: $('car-cons').value.trim() || null, ...withNote({ default_price: $('car-price').value.trim() || null }),
+    consumption: $('car-cons').value.trim() || null, tank_l: $('car-tank').value.trim() || null, ...withNote({ default_price: $('car-price').value.trim() || null }),
   }, 'Gespeichert'),
   avatar: () => avatarSheet(),
   color: async el => { const r = await saveMe({ avatar_color: el.dataset.c, avatar_data: null }); if (!r.error) closeSheet(); },

@@ -383,3 +383,15 @@ sup { font-size: .6em; vertical-align: .45em; margin-left: 1px; }
 .card .stats:last-child { margin-bottom: 0; }
 .month-seg { grid-auto-columns: minmax(0, 1fr); overflow-x: auto; }
 .month-seg button { font-size: 13px; padding: 0 4px; }
+.top-right { display: flex; gap: 8px; }
+#btn-stations.on { background: var(--ac); color: var(--ac-ink); }
+.st-pin { display: flex; flex-direction: column; align-items: center; transform: translate(-50%, -100%); position: absolute; left: 0; top: 0; }
+.st-pin b { background: var(--s1); color: var(--tx); font: 700 13px/1 'Barlow Condensed', sans-serif; padding: 5px 7px; border-radius: 8px; border: 2px solid var(--ac); white-space: nowrap; box-shadow: 0 3px 10px rgba(0,0,0,.5); }
+.st-pin b.closed { border-color: var(--s3); color: var(--mu); }
+.st-pin b.cheap { background: var(--ac); color: var(--ac-ink); }
+.st-pin i { width: 2px; height: 6px; background: var(--ac); }
+.gauge { height: 10px; border-radius: 5px; background: var(--s3); overflow: hidden; margin: 8px 0 4px; }
+.gauge i { display: block; height: 100%; border-radius: 5px; background: var(--ac); }
+.gauge.low i { background: var(--red); }
+.gauge.mid i { background: var(--amber); }
+.price-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 12px 0; }

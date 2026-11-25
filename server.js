@@ -21,8 +21,8 @@ const COLORS = ['#C8F03C', '#5CE1E6', '#FF8A5B', '#B69CFF', '#FFD25E', '#6EE7A8'
 
 // Real-world consumption (l/100 km) per car: city, rural (~80 km/h), motorway (~130 km/h)
 const slug = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-const CARS = require('./data/cars.json').map(([brand, model, engine, fuel, city, rural, motorway]) => ({
-  id: slug(`${brand} ${model} ${engine}`), brand, model, engine, fuel, city, rural, motorway,
+const CARS = require('./data/cars.json').map(([brand, model, engine, fuel, city, rural, motorway, tank]) => ({
+  id: slug(`${brand} ${model} ${engine}`), brand, model, engine, fuel, city, rural, motorway, tank,
   combined: Math.round((city + rural + motorway) / 3 * 10) / 10,
 }));
 const CAR_BY_ID = new Map(CARS.map(c => [c.id, c]));
@@ -183,7 +183,7 @@ db.exec(`
 ensureCols('users', {
   role: "TEXT DEFAULT 'passenger'", auto_start: 'INTEGER DEFAULT 1', car_name: 'TEXT',
   fuel_type: "TEXT DEFAULT 'benzin'", consumption: 'REAL', default_price: 'REAL', avatar_v: 'INTEGER',
-  cons_mode: "TEXT DEFAULT 'manual'", car_id: 'TEXT', petrol_grade: "TEXT DEFAULT 'e5'", price_at: 'INTEGER', price_note: 'TEXT', revolut: 'TEXT', iban: 'TEXT', account_name: 'TEXT',
+  cons_mode: "TEXT DEFAULT 'manual'", car_id: 'TEXT', petrol_grade: "TEXT DEFAULT 'e5'", price_at: 'INTEGER', price_note: 'TEXT', tank_l: 'REAL', fuel_l: 'REAL', fuel_at: 'INTEGER', revolut: 'TEXT', iban: 'TEXT', account_name: 'TEXT',
 });
 ensureCols('rides', {
   consumption: 'REAL', last_lat: 'REAL', last_lng: 'REAL', last_speed: 'REAL',
@@ -272,16 +272,17 @@ function push(uids, payload, exclude = null) {
 
 // ── Fuel prices (Tankerkönig, data by MTS-K) ──────────────────────────────────
 const tkCache = new Map();
-async function nearbyStations(lat, lng) {
+async function nearbyStations(lat, lng, rad = 5) {
   if (!TK_KEY) return null;
-  const key = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  const key = `${lat.toFixed(2)},${lng.toFixed(2)},${rad}`;
   const hit = tkCache.get(key);
   if (hit && Date.now() - hit.t < 10 * 60 * 1000) return hit.d;
-  const r = await fetch(`https://creativecommons.tankerkoenig.de/json/list.php?lat=${lat}&lng=${lng}&rad=5&sort=dist&type=all&apikey=${TK_KEY}`);
+  const r = await fetch(`https://creativecommons.tankerkoenig.de/json/list.php?lat=${lat}&lng=${lng}&rad=${rad}&sort=dist&type=all&apikey=${TK_KEY}`);
   const j = await r.json();
   if (!j.ok) throw new Error(j.message || 'Tankerkönig-Fehler');
-  const d = j.stations.filter(s => s.isOpen !== false).sort((a, b) => a.dist - b.dist).slice(0, 12).map(s => ({
-    name: (s.brand || s.name || 'Tankstelle').trim(), street: `${s.street || ''} ${s.houseNumber || ''}`.trim(), place: s.place,
+  const d = j.stations.sort((a, b) => a.dist - b.dist).slice(0, 80).map(s => ({
+    id: s.id, name: (s.brand || s.name || 'Tankstelle').trim(), fullName: s.name, street: `${s.street || ''} ${s.houseNumber || ''}`.trim(),
+    postCode: s.postCode, place: s.place, lat: s.lat, lng: s.lng, open: s.isOpen !== false,
     dist: s.dist, e5: s.e5 || null, e10: s.e10 || null, diesel: s.diesel || null,
   }));
   tkCache.set(key, { t: Date.now(), d });
@@ -301,7 +302,18 @@ function meJson(u) {
     fuel_type: u.fuel_type || 'benzin', consumption: u.consumption, default_price: u.default_price,
     cons_mode: u.cons_mode === 'car' ? 'car' : 'manual', car: CAR_BY_ID.get(u.car_id) || null, petrol_grade: u.petrol_grade === 'e10' ? 'e10' : 'e5', price_at: u.price_at, price_note: u.price_note,
     revolut: u.revolut, iban: u.iban, account_name: u.account_name,
+    tank_l: u.tank_l, tank_cap: tankCap(u), fuel: fuelState(u),
   };
+}
+
+// Estimated tank level: set from the range on the dashboard or a fill-up, minus fuel used on each ride
+function userCar(u) { return u.cons_mode === 'car' ? CAR_BY_ID.get(u.car_id) || null : null; }
+function userCons(u) { const car = userCar(u); return car ? car.combined : u.consumption || DEFAULT_CONSUMPTION[u.fuel_type || 'benzin']; }
+function tankCap(u) { return u.tank_l || userCar(u)?.tank || null; }
+function fuelState(u) {
+  if (u.fuel_l == null) return null;
+  const cap = tankCap(u), cons = userCons(u);
+  return { liters: Math.round(u.fuel_l * 10) / 10, cap, pct: cap ? Math.min(1, u.fuel_l / cap) : null, range: Math.round(u.fuel_l / cons * 100), at: u.fuel_at };
 }
 
 function payInfo(u) {
@@ -426,6 +438,14 @@ function broadcastPos(r) {
 function endRide(ride, at = now()) {
   db.prepare("UPDATE rides SET status = 'ended', ended_at = ? WHERE id = ?").run(at, ride.id);
   settle(ride.id);
+  const driver = q.userById.get(ride.driver_id), done = q.ride.get(ride.id);
+  if (driver.fuel_l != null && done.total_distance > 0) {
+    const used = done.total_distance * (done.consumption || userCons(driver)) / 100;
+    const left = Math.max(0, driver.fuel_l - used);
+    db.prepare('UPDATE users SET fuel_l = ? WHERE id = ?').run(Math.round(left * 10) / 10, driver.id);
+    const before = driver.fuel_l / userCons(driver) * 100, after = left / userCons(driver) * 100;
+    if (after < 60 && before >= 60) push([driver.id], { title: 'Tank fast leer', body: `Laut Schätzung noch ca. ${Math.round(after)} km Reichweite.`, url: '/?stations=1' });
+  }
   send(audience(ride), { type: 'ride_ended', rideId: ride.id });
 }
 
@@ -533,8 +553,18 @@ route('PUT', '/api/me', true, ({ user, body }) => {
       u.avatar_data = body.avatar_data; u.avatar_v = now();
     }
   }
-  const keys = Object.keys(u);
+  if ('tank_l' in body) u.tank_l = num(body.tank_l, 5, 200);
+  let keys = Object.keys(u);
   if (keys.length) db.prepare(`UPDATE users SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => u[k]), user.id);
+
+  const fresh = q.userById.get(user.id), cap = tankCap(fresh);
+  let fuel;
+  if (body.range_km != null) fuel = num(body.range_km, 0, 3000) * userCons(fresh) / 100;
+  else if (body.fuel_full) fuel = cap || fail(400, 'Trag zuerst die Tankgröße deines Autos ein.');
+  else if (body.fuel_added != null) fuel = (fresh.fuel_l || 0) + num(body.fuel_added, 0.5, 200);
+  if (fuel != null) {
+    db.prepare('UPDATE users SET fuel_l = ?, fuel_at = ? WHERE id = ?').run(Math.round((cap ? Math.min(cap, fuel) : fuel) * 10) / 10, now(), user.id);
+  }
   return { me: meJson(q.userById.get(user.id)) };
 });
 
@@ -895,7 +925,7 @@ route('GET', '/api/users/:id/stats', true, ({ user, params }) => {
 
   const buddyUser = buddy ? q.userById.get(buddy.other) : null;
   return {
-    user: { ...pub(u), role: u.role, since: u.created_at, car: carLabel(CAR_BY_ID.get(u.car_id)) || u.car_name || null },
+    user: { ...pub(u), role: u.role, since: u.created_at, car: carLabel(CAR_BY_ID.get(u.car_id)) || u.car_name || null, fuel: fuelState(u) },
     driven, ridden, carried, topSpeed, days, hours, rides,
     buddy: buddyUser ? { ...pub(buddyUser), count: buddy.c } : null,
     together,
@@ -977,7 +1007,8 @@ route('GET', '/api/fuel/nearby', true, async ({ url }) => {
   if (!TK_KEY) return { available: false, stations: [] };
   const lat = +url.searchParams.get('lat'), lng = +url.searchParams.get('lng');
   if (!Number.isFinite(lat) || !Number.isFinite(lng)) fail(400, 'Position fehlt.');
-  try { return { available: true, stations: await nearbyStations(lat, lng) }; }
+  const rad = Math.min(Math.max(Math.round(+url.searchParams.get('rad') || 5), 1), 25);
+  try { return { available: true, stations: await nearbyStations(lat, lng, rad) }; }
   catch (e) { fail(502, 'Tankerkönig ist gerade nicht erreichbar.'); }
 });
 
