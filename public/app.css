@@ -18,7 +18,8 @@
   --sb: env(safe-area-inset-bottom, 0px);
   --sl: env(safe-area-inset-left, 0px);
   --sr: env(safe-area-inset-right, 0px);
-  --tab-h: 62px;
+  --tab-h: 54px;
+  --tab-pad: max(calc(var(--sb) - 14px), 0px);
   color-scheme: dark;
 }
 
@@ -40,7 +41,7 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── Layout ─────────────────────────────────────────────────────────────── */
-.screen { position: absolute; inset: 0 0 calc(var(--tab-h) + var(--sb)) 0; }
+.screen { position: absolute; inset: 0 0 calc(var(--tab-h) + var(--tab-pad)) 0; }
 .page {
   overflow-y: auto; -webkit-overflow-scrolling: touch;
   padding: calc(var(--st) + 22px) max(16px, var(--sr)) 32px max(16px, var(--sl));
@@ -53,7 +54,7 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 /* ── Tab bar ───────────────────────────────────────────────────────────── */
 #tabbar {
   position: fixed; left: 0; right: 0; bottom: 0; z-index: 800;
-  height: calc(var(--tab-h) + var(--sb)); padding: 0 var(--sr) var(--sb) var(--sl);
+  height: calc(var(--tab-h) + var(--tab-pad)); padding: 0 var(--sr) var(--tab-pad) var(--sl);
   display: grid; grid-template-columns: repeat(4, 1fr);
   background: var(--bg); border-top: 1px solid var(--line);
 }
