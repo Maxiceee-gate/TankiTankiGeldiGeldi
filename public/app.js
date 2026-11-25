@@ -333,8 +333,24 @@ function onVisible() {
   if (S.tab === 'money') loadMoney();
 }
 
+// Switching location off often just stops updates without an error, so probe when updates go quiet
+function checkGpsAlive() {
+  if (!navigator.geolocation || S.gpsProbing || document.hidden) return;
+  if (S.pos && nowS() - S.pos.ts < 25) return;
+  if (!S.pos && S.gps !== 'ok') return;
+  S.gpsProbing = true;
+  navigator.geolocation.getCurrentPosition(p => { S.gpsProbing = false; onPos(p); }, e => {
+    S.gpsProbing = false;
+    S.gps = e.code === 1 ? 'denied' : 'weak';
+    updateChip();
+    if (S.tab === 'home') renderHome();
+    startGPS(true);
+  }, { enableHighAccuracy: true, maximumAge: 5000, timeout: 10000 });
+}
+
 function tick() {
   if (!S.me) return;
+  checkGpsAlive();
   flush();
   const cur = currentRide();
   if (cur && isMe(cur.driver)) checkStop();
@@ -560,7 +576,7 @@ async function syncRouteLine() {
 function updateChip() {
   const c = $('gps-chip');
   if (amDriving()) { c.className = 'chip drive'; c.textContent = 'Fahrt läuft'; return; }
-  const map = { off: ['warn', 'GPS startet …'], ok: ['ok', 'GPS aktiv'], weak: ['warn', 'Schwaches GPS'], denied: ['bad', 'Standort blockiert'], none: ['bad', 'Kein GPS'] };
+  const map = { off: ['warn', 'GPS startet …'], ok: ['ok', 'GPS aktiv'], weak: ['warn', 'Kein GPS-Signal'], denied: ['bad', 'Standort blockiert'], none: ['bad', 'Kein GPS'] };
   const [cls, txt] = map[S.gps] || map.off;
   c.className = 'chip ' + cls;
   c.textContent = txt;
