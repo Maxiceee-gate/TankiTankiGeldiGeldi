@@ -86,3 +86,14 @@ sudo systemctl enable --now tankigeldi-update.timer
 ```bash
 journalctl -u tankigeldi -f
 ```
+
+## Caddy-Eintrag dauerhaft sichern
+
+Das automatische Update des LSH-Portals schreibt `/etc/caddy/Caddyfile` neu. Damit der Tanki-Eintrag danach wieder drin ist:
+
+```bash
+install -m 755 deploy/tanki-caddy.sh /usr/local/bin/tanki-caddy
+mkdir -p /etc/systemd/system/lsh-update.service.d
+install -m 644 deploy/lsh-update-tanki.conf /etc/systemd/system/lsh-update.service.d/tanki.conf
+systemctl daemon-reload
+```
