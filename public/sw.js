@@ -1,4 +1,4 @@
-const CACHE = 'tanki-v4';
+const CACHE = 'tanki-v5';
 const TILES = 'tanki-tiles-v1';
 const LIBS = 'tanki-libs-v1';
 const MAX_TILES = 3000;
@@ -47,10 +47,21 @@ self.addEventListener('fetch', e => {
   );
 });
 
+self.addEventListener('push', e => {
+  let d = {};
+  try { d = e.data.json(); } catch { /* empty push */ }
+  e.waitUntil(self.registration.showNotification(d.title || 'TankiGeldi', {
+    body: d.body || '', icon: '/icon-192.png', badge: '/icon-192.png', tag: d.tag, data: { url: d.url || '/' },
+  }));
+});
+
 self.addEventListener('notificationclick', e => {
   e.notification.close();
+  const url = e.notification.data?.url || '/';
   e.waitUntil(self.clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
     const open = list.find(c => 'focus' in c);
-    return open ? open.focus() : self.clients.openWindow('/');
+    if (!open) return self.clients.openWindow(url);
+    open.postMessage({ type: 'open', url });
+    return open.focus();
   }));
 });

@@ -6,8 +6,11 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const Database = require('better-sqlite3');
 const { WebSocketServer } = require('ws');
+const webpush = require('web-push');
 
 const PORT = process.env.PORT || 8081;
+const TK_KEY = process.env.TANKERKOENIG_KEY || null;
+const APP_URL = 'https://tankigeldi.lsh-portal.de';
 const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'tankigeldi.db');
 const PUBLIC = path.join(__dirname, 'public');
 const JOIN_WINDOW = 30 * 60;
@@ -156,14 +159,35 @@ function ensureCols(table, cols) {
     if (!have.has(name)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${name} ${def}`);
   }
 }
+db.exec(`
+  CREATE TABLE IF NOT EXISTS settings (key TEXT PRIMARY KEY, value TEXT);
+  CREATE TABLE IF NOT EXISTS push_subs (
+    id INTEGER PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    endpoint TEXT UNIQUE NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL,
+    created_at INTEGER DEFAULT (unixepoch())
+  );
+  CREATE TABLE IF NOT EXISTS plans (
+    id INTEGER PRIMARY KEY,
+    driver_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    destination TEXT NOT NULL, depart_at INTEGER NOT NULL, seats INTEGER NOT NULL DEFAULT 3, note TEXT,
+    cancelled INTEGER DEFAULT 0, ride_id INTEGER, created_at INTEGER DEFAULT (unixepoch())
+  );
+  CREATE TABLE IF NOT EXISTS plan_members (
+    plan_id INTEGER NOT NULL REFERENCES plans(id) ON DELETE CASCADE,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    created_at INTEGER DEFAULT (unixepoch()),
+    PRIMARY KEY (plan_id, user_id)
+  );
+`);
 ensureCols('users', {
   role: "TEXT DEFAULT 'passenger'", auto_start: 'INTEGER DEFAULT 1', car_name: 'TEXT',
   fuel_type: "TEXT DEFAULT 'benzin'", consumption: 'REAL', default_price: 'REAL', avatar_v: 'INTEGER',
-  cons_mode: "TEXT DEFAULT 'manual'", car_id: 'TEXT', revolut: 'TEXT', iban: 'TEXT', account_name: 'TEXT',
+  cons_mode: "TEXT DEFAULT 'manual'", car_id: 'TEXT', petrol_grade: "TEXT DEFAULT 'e5'", revolut: 'TEXT', iban: 'TEXT', account_name: 'TEXT',
 });
 ensureCols('rides', {
   consumption: 'REAL', last_lat: 'REAL', last_lng: 'REAL', last_speed: 'REAL',
-  last_ts: 'INTEGER', last_seen: 'INTEGER', auto_started: 'INTEGER DEFAULT 0', car_id: 'TEXT', name: 'TEXT',
+  last_ts: 'INTEGER', last_seen: 'INTEGER', auto_started: 'INTEGER DEFAULT 0', car_id: 'TEXT', name: 'TEXT', price_note: 'TEXT',
 });
 ensureCols('ride_participants', {
   from_km: 'REAL DEFAULT 0', to_km: 'REAL', share_eur: 'REAL', paid_at: 'INTEGER', paid_by: 'INTEGER',
@@ -209,6 +233,7 @@ const q = {
     SELECT p.*, u.username, u.avatar_color, u.avatar_v FROM ride_participants p
     LEFT JOIN users u ON u.id = p.user_id WHERE p.ride_id = ? ORDER BY p.joined_at, p.id`),
   part: db.prepare('SELECT * FROM ride_participants WHERE ride_id = ? AND user_id = ?'),
+  planById: db.prepare('SELECT * FROM plans WHERE id = ?'),
   friendIds: db.prepare(`
     SELECT CASE WHEN requester_id = ? THEN addressee_id ELSE requester_id END AS id
     FROM friendships WHERE status = 'accepted' AND (requester_id = ? OR addressee_id = ?)`),
@@ -225,6 +250,62 @@ const friendIds = uid => q.friendIds.all(uid, uid, uid).map(r => r.id);
 const isFriend = (a, b) => !!q.isFriend.get(a, b, b, a);
 const currentRide = uid => q.activeAsDriver.get(uid) || q.activeAsPassenger.get(uid) || null;
 
+const getSetting = k => db.prepare('SELECT value FROM settings WHERE key = ?').get(k)?.value;
+const setSetting = (k, v) => db.prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(k, v);
+
+// ── Web Push (VAPID keys are generated once and kept in the database) ─────────
+let vapid = getSetting('vapid');
+if (!vapid) { vapid = JSON.stringify(webpush.generateVAPIDKeys()); setSetting('vapid', vapid); }
+vapid = JSON.parse(vapid);
+webpush.setVapidDetails(APP_URL, vapid.publicKey, vapid.privateKey);
+
+function push(uids, payload, exclude = null) {
+  const ids = [...new Set(uids)].filter(id => id && id !== exclude);
+  if (!ids.length) return;
+  const subs = db.prepare(`SELECT * FROM push_subs WHERE user_id IN (${ids.map(() => '?').join(',')})`).all(...ids);
+  const body = JSON.stringify(payload);
+  for (const sub of subs) {
+    webpush.sendNotification({ endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } }, body, { TTL: 6 * 3600 })
+      .catch(e => { if (e.statusCode === 404 || e.statusCode === 410) db.prepare('DELETE FROM push_subs WHERE id = ?').run(sub.id); });
+  }
+}
+
+// ── Fuel prices (Tankerkönig, data by MTS-K) ──────────────────────────────────
+const tkCache = new Map();
+async function nearbyStations(lat, lng) {
+  if (!TK_KEY) return null;
+  const key = `${lat.toFixed(2)},${lng.toFixed(2)}`;
+  const hit = tkCache.get(key);
+  if (hit && Date.now() - hit.t < 10 * 60 * 1000) return hit.d;
+  const r = await fetch(`https://creativecommons.tankerkoenig.de/json/list.php?lat=${lat}&lng=${lng}&rad=5&sort=dist&type=all&apikey=${TK_KEY}`);
+  const j = await r.json();
+  if (!j.ok) throw new Error(j.message || 'Tankerkönig-Fehler');
+  const d = j.stations.filter(s => s.isOpen !== false).sort((a, b) => a.dist - b.dist).slice(0, 12).map(s => ({
+    name: (s.brand || s.name || 'Tankstelle').trim(), street: `${s.street || ''} ${s.houseNumber || ''}`.trim(), place: s.place,
+    dist: s.dist, e5: s.e5 || null, e10: s.e10 || null, diesel: s.diesel || null,
+  }));
+  tkCache.set(key, { t: Date.now(), d });
+  return d;
+}
+const gradeFor = (fuel, user) => fuel === 'diesel' ? 'diesel' : fuel === 'benzin' ? (user?.petrol_grade === 'e10' ? 'e10' : 'e5') : null;
+
+// Fill a missing ride price from the nearest station; failures just leave it empty
+async function autoPrice(rideId) {
+  const ride = q.ride.get(rideId);
+  if (!ride || ride.fuel_price || ride.last_lat == null) return;
+  const grade = gradeFor(ride.fuel_type, q.userById.get(ride.driver_id));
+  if (!grade) return;
+  try {
+    const st = (await nearbyStations(ride.last_lat, ride.last_lng))?.find(x => x[grade]);
+    if (!st) return;
+    const fresh = q.ride.get(rideId);
+    if (!fresh || fresh.fuel_price) return;
+    db.prepare('UPDATE rides SET fuel_price = ?, price_note = ? WHERE id = ?').run(st[grade], `${st.name}, ${st.street || st.place} (Tankerkönig)`, rideId);
+    settle(rideId);
+    send(audience(fresh), { type: 'ride_updated', rideId });
+  } catch (e) { console.error('autoPrice', e.message); }
+}
+
 function pub(u) {
   return {
     id: u.id, username: u.username, color: u.avatar_color || COLORS[0],
@@ -236,7 +317,7 @@ function meJson(u) {
   return {
     ...pub(u), role: u.role, auto_start: !!u.auto_start, car_name: u.car_name,
     fuel_type: u.fuel_type || 'benzin', consumption: u.consumption, default_price: u.default_price,
-    cons_mode: u.cons_mode === 'car' ? 'car' : 'manual', car: CAR_BY_ID.get(u.car_id) || null,
+    cons_mode: u.cons_mode === 'car' ? 'car' : 'manual', car: CAR_BY_ID.get(u.car_id) || null, petrol_grade: u.petrol_grade === 'e10' ? 'e10' : 'e5',
     revolut: u.revolut, iban: u.iban, account_name: u.account_name,
   };
 }
@@ -260,7 +341,7 @@ function rideCard(r, meId, parts = q.parts.all(r.id)) {
   return {
     id: r.id, name: r.name, status: r.status, started_at: r.started_at, ended_at: r.ended_at,
     total_distance: r.total_distance || 0, fuel_type: r.fuel_type, fuel_price: r.fuel_price,
-    consumption: r.consumption, auto_started: !!r.auto_started, car: carLabel(CAR_BY_ID.get(r.car_id)) || null,
+    consumption: r.consumption, auto_started: !!r.auto_started, car: carLabel(CAR_BY_ID.get(r.car_id)) || null, price_note: r.price_note,
     last_lat: r.last_lat, last_lng: r.last_lng, last_speed: r.last_speed, last_seen: r.last_seen,
     driver: pub(q.userById.get(r.driver_id)),
     participants: parts.map(partJson),
@@ -437,6 +518,7 @@ route('PUT', '/api/me', true, ({ user, body }) => {
   }
   if ('consumption' in body) u.consumption = num(body.consumption, 1, 40);
   if ('default_price' in body) u.default_price = num(body.default_price, 0.1, 5);
+  if ('petrol_grade' in body) u.petrol_grade = body.petrol_grade === 'e10' ? 'e10' : 'e5';
   if ('cons_mode' in body) u.cons_mode = body.cons_mode === 'car' ? 'car' : 'manual';
   if ('car_id' in body) {
     const car = body.car_id ? CAR_BY_ID.get(body.car_id) || fail(400, 'Auto nicht gefunden.') : null;
@@ -483,7 +565,11 @@ route('GET', '/api/feed', true, ({ user }) => {
     SELECT COUNT(*) AS n FROM rides r WHERE driver_id = ? AND status = 'ended' AND fuel_price IS NULL
       AND EXISTS (SELECT 1 FROM ride_participants p WHERE p.ride_id = r.id)`).get(user.id).n;
   const requests = db.prepare("SELECT COUNT(*) AS n FROM friendships WHERE addressee_id = ? AND status = 'pending'").get(user.id).n;
+  const plans = db.prepare(`
+    SELECT * FROM plans WHERE cancelled = 0 AND ride_id IS NULL AND depart_at > ?
+      AND driver_id IN (${ids.map(() => '?').join(',')}) ORDER BY depart_at LIMIT 20`).all(now() - 3 * 3600, ...ids).map(planJson);
   return {
+    plans,
     rides: rides.map(r => rideCard(r, user.id)), current: cur ? cur.id : null,
     friends: fids.length, requests, missingPrice, now: now(),
   };
@@ -521,7 +607,23 @@ route('POST', '/api/rides', true, ({ user, body }) => {
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, fuel, car ? car.combined : user.consumption || DEFAULT_CONSUMPTION[fuel],
     user.default_price, started, t, body.auto ? 1 : 0, car ? car.id : null).lastInsertRowid;
   const ride = addPoints(q.ride.get(id), pts.filter(p => +p.ts >= started));
+
+  // A ride started around a planned departure takes over the plan's sign-ups
+  const plan = db.prepare(`SELECT * FROM plans WHERE driver_id = ? AND cancelled = 0 AND ride_id IS NULL
+    AND depart_at BETWEEN ? AND ? ORDER BY ABS(depart_at - ?) LIMIT 1`).get(user.id, t - 3 * 3600, t + 3600, t);
+  if (plan) {
+    db.prepare('UPDATE plans SET ride_id = ? WHERE id = ?').run(id, plan.id);
+    db.prepare('UPDATE rides SET name = ? WHERE id = ?').run(`Nach ${plan.destination}`.slice(0, 50), id);
+    const members = db.prepare('SELECT user_id FROM plan_members WHERE plan_id = ?').all(plan.id).map(m => m.user_id);
+    const ins = db.prepare('INSERT INTO ride_participants (ride_id, user_id) VALUES (?, ?)');
+    members.forEach(m => ins.run(id, m));
+    settle(id);
+    push(members, { title: `Fahrt nach ${plan.destination} läuft`, body: `${user.username} ist losgefahren – du bist als Mitfahrer eingetragen.`, url: `/?ride=${id}`, tag: 'ride-' + id });
+  }
   send(audience(ride), { type: 'ride_started', rideId: id, driver: user.username }, user.id);
+  push(friendIds(user.id).filter(f => !plan || !db.prepare('SELECT 1 FROM plan_members WHERE plan_id = ? AND user_id = ?').get(plan.id, f)),
+    { title: `${user.username} fährt los`, body: 'Sitzt du mit drin? Tippe zum Mitfahren.', url: `/?ride=${id}`, tag: 'ride-' + id });
+  if (!ride.fuel_price) setTimeout(() => autoPrice(id), 1000);
   return { ride: rideCard(ride, user.id) };
 });
 
@@ -533,11 +635,12 @@ route('POST', '/api/rides/:id/points', true, ({ user, params, body }) => {
   return { total_distance: ride.total_distance };
 });
 
-route('POST', '/api/rides/:id/end', true, ({ user, params, body }) => {
+route('POST', '/api/rides/:id/end', true, async ({ user, params, body }) => {
   const ride = driverRide(params.id, user.id);
   if (ride.status !== 'active') fail(409, 'Fahrt ist schon beendet.');
   if (body.points) addPoints(ride, body.points);
   endRide(ride);
+  if (!ride.fuel_price) await autoPrice(ride.id);
   return { ok: true };
 });
 
@@ -556,7 +659,7 @@ route('PUT', '/api/rides/:id', true, ({ user, params, body }) => {
     if (!FUEL_TYPES.includes(body.fuel_type)) fail(400, 'Unbekannte Kraftstoffart.');
     u.fuel_type = body.fuel_type;
   }
-  if ('fuel_price' in body) u.fuel_price = num(body.fuel_price, 0.1, 5);
+  if ('fuel_price' in body) { u.fuel_price = num(body.fuel_price, 0.1, 5); u.price_note = body.price_note ? String(body.price_note).slice(0, 120) : null; }
   if ('consumption' in body) { u.consumption = num(body.consumption, 1, 40); u.car_id = null; }
   const keys = Object.keys(u);
   if (keys.length) db.prepare(`UPDATE rides SET ${keys.map(k => k + ' = ?').join(', ')} WHERE id = ?`).run(...keys.map(k => u[k]), ride.id);
@@ -586,6 +689,7 @@ route('POST', '/api/rides/:id/join', true, ({ user, params, body }) => {
   db.prepare('INSERT INTO ride_participants (ride_id, user_id, from_km) VALUES (?, ?, ?)').run(ride.id, user.id, from);
   settle(ride.id);
   send(audience(ride), { type: 'ride_updated', rideId: ride.id, msg: `${user.username} fährt mit` }, user.id);
+  push([ride.driver_id], { title: `${user.username} fährt mit`, body: 'Die Spritkosten werden automatisch aufgeteilt.', url: `/?ride=${ride.id}`, tag: 'ride-' + ride.id });
 });
 
 route('POST', '/api/rides/:id/leave', true, ({ user, params }) => {
@@ -610,6 +714,7 @@ route('POST', '/api/rides/:id/participants', true, ({ user, params, body }) => {
     if (q.part.get(ride.id, uid)) fail(409, 'Ist schon dabei.');
     db.prepare('INSERT INTO ride_participants (ride_id, user_id) VALUES (?, ?)').run(ride.id, uid);
     send([uid], { type: 'ride_updated', rideId: ride.id, msg: `${user.username} hat dich zu einer Fahrt hinzugefügt` });
+    push([uid], { title: 'Zu einer Fahrt hinzugefügt', body: `${user.username} hat dich als Mitfahrer eingetragen.`, url: `/?ride=${ride.id}` });
   } else {
     const name = String(body.guestName || '').trim().slice(0, 30) || fail(400, 'Name fehlt.');
     db.prepare('INSERT INTO ride_participants (ride_id, guest_name) VALUES (?, ?)').run(ride.id, name);
@@ -682,7 +787,11 @@ route('POST', '/api/participants/:pid/paid', true, ({ user, params, body }) => {
   const paid = body.paid !== false;
   db.prepare('UPDATE ride_participants SET paid_at = ?, paid_by = ? WHERE id = ?').run(paid ? now() : null, paid ? user.id : null, p.id);
   const other = p.driver_id === user.id ? p.user_id : p.driver_id;
-  if (other && paid) send([other], { type: 'balance', msg: `${user.username}: ${p.share_eur?.toFixed(2).replace('.', ',')} € als bezahlt markiert` });
+  if (other && paid) {
+    const msg = `${user.username}: ${p.share_eur?.toFixed(2).replace('.', ',')} € als bezahlt markiert`;
+    send([other], { type: 'balance', msg });
+    push([other], { title: 'Zahlung', body: msg, url: '/?tab=money' });
+  }
 });
 
 route('POST', '/api/balances/settle', true, ({ user, body }) => {
@@ -809,6 +918,145 @@ route('GET', '/api/users/:id/stats', true, ({ user, params }) => {
   };
 });
 
+function planJson(p) {
+  const members = db.prepare('SELECT u.* FROM plan_members m JOIN users u ON u.id = m.user_id WHERE m.plan_id = ? ORDER BY m.created_at').all(p.id);
+  return {
+    id: p.id, destination: p.destination, depart_at: p.depart_at, seats: p.seats, note: p.note,
+    driver: pub(q.userById.get(p.driver_id)), members: members.map(pub),
+  };
+}
+
+function viewablePlan(id, uid) {
+  const p = db.prepare('SELECT * FROM plans WHERE id = ?').get(id) || fail(404, 'Fahrt nicht gefunden.');
+  if (p.driver_id !== uid && !isFriend(uid, p.driver_id)) fail(403, 'Keine Berechtigung.');
+  return p;
+}
+
+route('POST', '/api/plans', true, ({ user, body }) => {
+  const destination = String(body.destination || '').trim().slice(0, 60) || fail(400, 'Bitte ein Ziel eintragen.');
+  const depart = Math.round(+body.depart_at);
+  if (!Number.isFinite(depart) || depart < now() - 3600 || depart > now() + 60 * 86400) fail(400, 'Bitte eine Abfahrtszeit innerhalb der nächsten 60 Tage wählen.');
+  const seats = Math.min(Math.max(Math.round(+body.seats) || 3, 1), 8);
+  const note = String(body.note || '').trim().slice(0, 140) || null;
+  const id = db.prepare('INSERT INTO plans (driver_id, destination, depart_at, seats, note) VALUES (?, ?, ?, ?, ?)').run(user.id, destination, depart, seats, note).lastInsertRowid;
+  const when = new Date(depart * 1000).toLocaleString('de-DE', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', timeZone: 'Europe/Berlin' });
+  const fids = friendIds(user.id);
+  push(fids, { title: `${user.username} fährt nach ${destination}`, body: `${when} · ${seats} ${seats === 1 ? 'Platz' : 'Plätze'} frei – tippe zum Mitfahren.`, url: `/?plan=${id}`, tag: 'plan-' + id });
+  send(fids, { type: 'plan', msg: `${user.username} plant eine Fahrt nach ${destination}` });
+  return { plan: planJson(q.planById.get(id)) };
+});
+
+route('GET', '/api/plans/:id', true, ({ user, params }) => ({ plan: planJson(viewablePlan(params.id, user.id)) }));
+
+route('POST', '/api/plans/:id/join', true, ({ user, params }) => {
+  const p = viewablePlan(params.id, user.id);
+  if (p.driver_id === user.id) fail(400, 'Das ist deine eigene Fahrt.');
+  if (p.cancelled || p.ride_id) fail(409, 'Diese Fahrt ist nicht mehr offen.');
+  const n = db.prepare('SELECT COUNT(*) AS n FROM plan_members WHERE plan_id = ?').get(p.id).n;
+  if (n >= p.seats) fail(409, 'Alle Plätze sind schon vergeben.');
+  db.prepare('INSERT OR IGNORE INTO plan_members (plan_id, user_id) VALUES (?, ?)').run(p.id, user.id);
+  push([p.driver_id], { title: `${user.username} fährt mit nach ${p.destination}`, body: `${n + 1} von ${p.seats} Plätzen belegt.`, url: `/?plan=${p.id}`, tag: 'plan-' + p.id });
+  send([p.driver_id, ...friendIds(p.driver_id)], { type: 'plan' }, user.id);
+});
+
+route('POST', '/api/plans/:id/leave', true, ({ user, params }) => {
+  const p = viewablePlan(params.id, user.id);
+  db.prepare('DELETE FROM plan_members WHERE plan_id = ? AND user_id = ?').run(p.id, user.id);
+  push([p.driver_id], { title: `${user.username} fährt doch nicht mit`, body: `Fahrt nach ${p.destination}`, url: `/?plan=${p.id}`, tag: 'plan-' + p.id });
+  send([p.driver_id, ...friendIds(p.driver_id)], { type: 'plan' }, user.id);
+});
+
+route('DELETE', '/api/plans/:id', true, ({ user, params }) => {
+  const p = viewablePlan(params.id, user.id);
+  if (p.driver_id !== user.id) fail(403, 'Nur der Fahrer kann absagen.');
+  const members = db.prepare('SELECT user_id FROM plan_members WHERE plan_id = ?').all(p.id).map(m => m.user_id);
+  db.prepare('UPDATE plans SET cancelled = 1 WHERE id = ?').run(p.id);
+  push(members, { title: `Fahrt nach ${p.destination} abgesagt`, body: `${user.username} hat die Fahrt abgesagt.`, url: '/' });
+  send([user.id, ...friendIds(user.id)], { type: 'plan' }, user.id);
+});
+
+route('GET', '/api/push/key', true, () => ({ key: vapid.publicKey }));
+
+route('POST', '/api/push/subscribe', true, ({ user, body }) => {
+  const endpoint = String(body.endpoint || '');
+  const { p256dh, auth } = body.keys || {};
+  if (!/^https:\/\//.test(endpoint) || !p256dh || !auth) fail(400, 'Ungültiges Abo.');
+  db.prepare(`INSERT INTO push_subs (user_id, endpoint, p256dh, auth) VALUES (?, ?, ?, ?)
+    ON CONFLICT(endpoint) DO UPDATE SET user_id = excluded.user_id, p256dh = excluded.p256dh, auth = excluded.auth`).run(user.id, endpoint, p256dh, auth);
+});
+
+route('POST', '/api/push/test', true, ({ user }) => {
+  push([user.id], { title: 'Benachrichtigungen funktionieren', body: 'So siehst du, wenn Freunde losfahren oder eine Fahrt planen.', url: '/' });
+});
+
+route('GET', '/api/fuel/nearby', true, async ({ url }) => {
+  if (!TK_KEY) return { available: false, stations: [] };
+  const lat = +url.searchParams.get('lat'), lng = +url.searchParams.get('lng');
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) fail(400, 'Position fehlt.');
+  try { return { available: true, stations: await nearbyStations(lat, lng) }; }
+  catch (e) { fail(502, 'Tankerkönig ist gerade nicht erreichbar.'); }
+});
+
+// Monthly statement: who owes whom from rides in a month, paid or not
+route('GET', '/api/statement', true, ({ user, url }) => {
+  const m = /^(\d{4})-(\d{2})$/.exec(url.searchParams.get('month') || '') || fail(400, 'Monat fehlt.');
+  const from = Date.UTC(+m[1], +m[2] - 1, 1) / 1000, to = Date.UTC(+m[1], +m[2], 1) / 1000;
+  const rides = db.prepare(`
+    SELECT r.* FROM rides r WHERE r.status = 'ended' AND r.started_at >= ? AND r.started_at < ?
+      AND (r.driver_id = ? OR EXISTS (SELECT 1 FROM ride_participants p WHERE p.ride_id = r.id AND p.user_id = ?))
+    ORDER BY r.started_at`).all(from, to, user.id, user.id);
+  const people = new Map();
+  const person = (key, who) => people.get(key) || people.set(key, { key, who, toMe: 0, fromMe: 0, openToMe: 0, openFromMe: 0 }).get(key);
+  let km = 0, fuelSpent = 0, myCost = 0, missing = 0;
+  for (const r of rides) {
+    const parts = q.parts.all(r.id);
+    const calc = shareCalc(r, parts);
+    if (calc.totalCost == null) missing++;
+    if (r.driver_id === user.id) {
+      km += r.total_distance || 0;
+      fuelSpent += calc.totalCost || 0;
+      myCost += calc.driverShare || 0;
+      for (const p of parts) {
+        if (!(p.share_eur > 0)) continue;
+        const b = p.user_id ? person('u' + p.user_id, pub(q.userById.get(p.user_id))) : person('g' + p.guest_name.toLowerCase(), { username: p.guest_name, guest: true, color: '#8D958A' });
+        b.toMe += p.share_eur;
+        if (!p.paid_at) b.openToMe += p.share_eur;
+      }
+    } else {
+      const p = parts.find(x => x.user_id === user.id);
+      km += (p.to_km ?? r.total_distance) - (p.from_km || 0);
+      myCost += p.share_eur || 0;
+      if (p.share_eur > 0) {
+        const b = person('u' + r.driver_id, pub(q.userById.get(r.driver_id)));
+        b.fromMe += p.share_eur;
+        if (!p.paid_at) b.openFromMe += p.share_eur;
+      }
+    }
+  }
+  const round = o => Object.fromEntries(Object.entries(o).map(([k, v]) => [k, typeof v === 'number' ? r2(v) : v]));
+  return {
+    month: m[0], rides: rides.length, km: Math.round(km * 10) / 10, fuelSpent: r2(fuelSpent), myCost: r2(myCost), missing,
+    people: [...people.values()].map(round).sort((a, b) => Math.abs(b.toMe - b.fromMe) - Math.abs(a.toMe - a.fromMe)),
+  };
+});
+
+// On the 1st of each month, tell everyone who drove last month that their statement is ready
+setInterval(() => {
+  const d = new Date();
+  if (d.getUTCDate() !== 1 || d.getUTCHours() < 8) return;
+  const prev = new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth() - 1, 1));
+  const key = 'statement-' + prev.toISOString().slice(0, 7);
+  if (getSetting(key)) return;
+  setSetting(key, '1');
+  const from = prev.getTime() / 1000, to = Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), 1) / 1000;
+  const uids = db.prepare(`
+    SELECT driver_id AS id FROM rides WHERE status = 'ended' AND started_at >= ? AND started_at < ?
+    UNION SELECT p.user_id FROM ride_participants p JOIN rides r ON r.id = p.ride_id
+      WHERE r.status = 'ended' AND r.started_at >= ? AND r.started_at < ? AND p.user_id IS NOT NULL`).all(from, to, from, to).map(r => r.id);
+  const label = prev.toLocaleDateString('de-DE', { month: 'long', timeZone: 'UTC' });
+  push(uids, { title: `Monatsabrechnung ${label}`, body: 'Schau nach, wer wem noch etwas schuldet.', url: '/?tab=money' });
+}, 30 * 60 * 1000);
+
 route('GET', '/api/cars', false, () => ({ cars: CARS }));
 
 route('POST', '/api/friends/request', true, ({ user, body }) => {
@@ -828,6 +1076,7 @@ route('POST', '/api/friends/request', true, ({ user, body }) => {
   }
   db.prepare('INSERT INTO friendships (requester_id, addressee_id) VALUES (?, ?)').run(user.id, target.id);
   send([target.id], { type: 'friend_request', msg: `${user.username} möchte mit dir befreundet sein` });
+  push([target.id], { title: 'Freundschaftsanfrage', body: `${user.username} möchte mit dir befreundet sein.`, url: '/?tab=friends' });
   return { status: 'sent' };
 });
 
@@ -837,6 +1086,7 @@ route('POST', '/api/friends/respond', true, ({ user, body }) => {
   if (body.accept) {
     db.prepare("UPDATE friendships SET status = 'accepted' WHERE id = ?").run(f.id);
     send([f.requester_id], { type: 'friend_accepted', msg: `${user.username} hat deine Anfrage angenommen` });
+    push([f.requester_id], { title: 'Neuer Freund', body: `${user.username} hat deine Anfrage angenommen.`, url: '/?tab=friends' });
   } else {
     db.prepare('DELETE FROM friendships WHERE id = ?').run(f.id);
   }

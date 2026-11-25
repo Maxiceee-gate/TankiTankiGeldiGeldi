@@ -183,8 +183,12 @@ function setupSheetSwipe() {
 
 // ── Boot / auth ───────────────────────────────────────────────────────────────
 function boot() {
-  const add = new URLSearchParams(location.search).get('add');
-  if (add) { lsSet('pendingAdd', add); history.replaceState(null, '', '/'); }
+  const qs = new URLSearchParams(location.search);
+  const add = qs.get('add');
+  if (add) lsSet('pendingAdd', add);
+  S.deepLink = qs.get('ride') || qs.get('plan') || qs.get('tab') ? new URLSearchParams(qs) : null;
+  if (location.search) history.replaceState(null, '', '/');
+  navigator.serviceWorker?.addEventListener('message', e => { if (e.data?.type === 'open') openDeepLink(new URL(e.data.url, location.origin).searchParams); });
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});
   document.addEventListener('click', onClick);
   document.addEventListener('change', onChange);
@@ -298,6 +302,98 @@ async function start() {
   await loadFeed();
   const add = lsGet('pendingAdd');
   if (add) { lsSet('pendingAdd', null); addInvite(add); }
+  if (S.deepLink) { openDeepLink(S.deepLink); S.deepLink = null; }
+  syncPush();
+}
+
+function openDeepLink(qs) {
+  if (!S.me) { S.deepLink = qs; return; }
+  if (qs.get('ride')) openDetail(+qs.get('ride'));
+  else if (qs.get('plan')) openPlan(+qs.get('plan'));
+  else if (qs.get('tab')) { closeDetail(); $('profile').hidden = true; $('user').hidden = true; showTab(qs.get('tab')); }
+}
+
+// ── Push notifications ────────────────────────────────────────────────────────
+const pushSupported = () => 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+function b64ToU8(s) {
+  const b = atob((s + '='.repeat((4 - s.length % 4) % 4)).replace(/-/g, '+').replace(/_/g, '/'));
+  return Uint8Array.from(b, c => c.charCodeAt(0));
+}
+async function subscribePush() {
+  const reg = await navigator.serviceWorker.ready;
+  const k = await api('GET', '/api/push/key');
+  if (k.error) throw new Error(k.error);
+  let sub = await reg.pushManager.getSubscription();
+  if (!sub) sub = await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: b64ToU8(k.key) });
+  const r = await api('POST', '/api/push/subscribe', sub.toJSON());
+  if (r.error) throw new Error(r.error);
+  S.pushOn = true;
+}
+// Keep the server's subscription current whenever permission was already given
+async function syncPush() {
+  if (!pushSupported() || Notification.permission !== 'granted') return;
+  try { await subscribePush(); } catch { /* retried on next start */ }
+}
+async function enablePush() {
+  if (!pushSupported()) {
+    return toast(isIOS && !isStandalone() ? 'Auf dem iPhone geht das nur in der installierten App vom Startbildschirm' : 'Dieser Browser unterstützt keine Benachrichtigungen', 'err');
+  }
+  const perm = await Notification.requestPermission();
+  if (perm !== 'granted') return toast('Benachrichtigungen wurden nicht erlaubt', 'err');
+  try {
+    await subscribePush();
+    await api('POST', '/api/push/test');
+    toast('Benachrichtigungen aktiviert');
+  } catch (e) { toast('Aktivieren fehlgeschlagen: ' + e.message, 'err'); }
+  if (!$('profile').hidden) renderProfile();
+  if (S.tab === 'home') renderHome();
+}
+
+// ── Planned rides ─────────────────────────────────────────────────────────────
+const whenStr = ts => {
+  const d = new Date(ts * 1000), today = new Date();
+  const diff = Math.round((new Date(d.getFullYear(), d.getMonth(), d.getDate()) - new Date(today.getFullYear(), today.getMonth(), today.getDate())) / 864e5);
+  const day = diff === 0 ? 'Heute' : diff === 1 ? 'Morgen' : d.toLocaleDateString('de-DE', { weekday: 'short', day: 'numeric', month: 'short' });
+  return `${day}, ${timeStr(ts)}`;
+};
+
+function planRow(p) {
+  const mine = isMe(p.driver), joined = p.members.some(isMe), free = p.seats - p.members.length;
+  const btn = mine ? '<span class="pill done">Deine</span>'
+    : joined ? '<span class="pill done">Dabei</span>'
+    : free > 0 ? `<button class="pill" data-act="plan-join" data-id="${p.id}">Mitfahren</button>` : '<span class="pill done">Voll</span>';
+  return `<div class="row tap" data-act="plan" data-id="${p.id}">${av(p.driver, 44)}
+    <div class="grow"><b class="ell">${mine ? 'Du' : esc(p.driver.username)} → ${esc(p.destination)}</b>
+    <small class="ell">${whenStr(p.depart_at)} · ${p.members.length}/${p.seats} Plätze${p.members.length ? ' · ' + p.members.map(m => esc(m.username)).join(', ') : ''}</small></div>${btn}</div>`;
+}
+
+function planSheet() {
+  const d = new Date(Date.now() + 3600e3);
+  d.setMinutes(Math.ceil(d.getMinutes() / 15) * 15, 0, 0);
+  const local = new Date(d.getTime() - d.getTimezoneOffset() * 60e3).toISOString().slice(0, 16);
+  openSheet(`<h3>Fahrt planen</h3><p>Deine Freunde bekommen eine Nachricht und können sich anmelden. Wenn du losfährst, sind alle Angemeldeten automatisch dabei.</p>
+    <label class="field"><span>Wohin?</span><input id="plan-dest" maxlength="60" placeholder="z. B. München, Uni, Fußballplatz"></label>
+    <div class="field-row">
+      <label class="field"><span>Abfahrt</span><input id="plan-when" type="datetime-local" value="${local}"></label>
+      <label class="field"><span>Freie Plätze</span><input id="plan-seats" type="number" min="1" max="8" value="3" inputmode="numeric"></label>
+    </div>
+    <label class="field"><span>Notiz (optional)</span><input id="plan-note" maxlength="140" placeholder="z. B. Treffpunkt Bahnhof"></label>
+    <div style="height:16px"></div><button class="btn" data-act="plan-save">Freunde benachrichtigen</button>`);
+}
+
+async function openPlan(id) {
+  const r = await call('GET', `/api/plans/${id}`);
+  if (r.error) return;
+  const p = r.plan, mine = isMe(p.driver), joined = p.members.some(isMe), free = p.seats - p.members.length;
+  openSheet(`<div class="center">${av(p.driver, 64)}</div>
+    <h3 class="center">${mine ? 'Du fährst' : esc(p.driver.username) + ' fährt'} nach ${esc(p.destination)}</h3>
+    <p class="center">${whenStr(p.depart_at)} · ${free > 0 ? `${free} ${free === 1 ? 'Platz' : 'Plätze'} frei` : 'voll'}${p.note ? `<br>${esc(p.note)}` : ''}</p>
+    <div class="section-h"><span>Angemeldet</span><span>${p.members.length}/${p.seats}</span></div>
+    ${p.members.map(m => `<div class="row">${av(m, 36)}<div class="grow"><b>${isMe(m) ? 'Du' : esc(m.username)}</b></div></div>`).join('') || '<div class="empty">Noch niemand.</div>'}
+    <div style="height:16px"></div>
+    ${mine ? `<button class="btn danger" data-act="plan-cancel" data-id="${p.id}">Fahrt absagen</button>`
+      : joined ? `<button class="btn ghost" data-act="plan-leave" data-id="${p.id}">Doch nicht mitfahren</button>`
+      : free > 0 ? `<button class="btn" data-act="plan-join" data-id="${p.id}">Ich fahre mit</button>` : ''}`);
 }
 
 async function logout(expired = false) {
@@ -418,6 +514,9 @@ function renderHome() {
   if (f.missingPrice > mineEnded.length) {
     h += `<button class="alert" data-act="tab" data-tab="money">${ICON.pump}<span class="grow">${f.missingPrice} Fahrten ohne Spritpreis<small>Ohne Preis kann nicht abgerechnet werden</small></span>${ICON.chev}</button>`;
   }
+  if (pushSupported() && Notification.permission === 'default' && !lsGet('pushHidden') && (isStandalone() || !isIOS)) {
+    h += `<button class="alert ac" data-act="notif">${ICON.phone}<span class="grow">Benachrichtigungen aktivieren<small>Damit du mitbekommst, wenn Freunde losfahren oder eine Fahrt planen</small></span>${ICON.chev}</button>`;
+  }
   if (!isStandalone() && !lsGet('installHidden')) {
     h += `<button class="alert ac" data-act="install">${ICON.phone}<span class="grow">Als App installieren<small>Vollbild und zuverlässigere GPS-Erkennung</small></span>${ICON.chev}</button>`;
   }
@@ -426,6 +525,9 @@ function renderHome() {
   const active = others.filter(r => r.status === 'active');
   const ended = others.filter(r => r.status === 'ended' && r.ended_at > f.now - JOIN_WINDOW);
 
+  if (f.plans?.length) {
+    h += `<div class="section"><div class="section-h"><span>Geplante Fahrten</span><span>${f.plans.length}</span></div>${f.plans.map(planRow).join('')}</div>`;
+  }
   h += `<div class="section"><div class="section-h"><span>Freunde unterwegs</span><span>${active.length || ''}</span></div>`;
   if (!f.friends) {
     h += `<button class="alert ac" data-act="tab" data-tab="friends">${ICON.users}<span class="grow">Füge Freunde hinzu<small>Dann siehst du hier, wer gerade fährt</small></span>${ICON.chev}</button>`;
@@ -448,10 +550,12 @@ function idleCard() {
         ? `Fahr einfach los: ab ${AUTO_KMH} km/h startet die Fahrt automatisch – inklusive der ersten Meter.`
         : 'Automatischer Start ist aus. Starte deine Fahrt per Knopf.';
     return `<div class="hello"><h2>Hi ${name}</h2><p>${sub}</p></div>
-      <button class="btn" data-act="start">${ICON.car} Fahrt jetzt starten</button>`;
+      <button class="btn" data-act="start">${ICON.car} Fahrt jetzt starten</button>
+      <button class="btn ghost" data-act="plan-new">Fahrt planen & Freunde fragen</button>`;
   }
   return `<div class="hello"><h2>Hi ${name}</h2><p>Sobald ein Freund losfährt, siehst du ihn hier und auf der Karte. Mit einem Tipp fährst du mit – sitzt du schon im Auto, fragt dich die App von selbst.</p></div>
-    <button class="btn ghost" data-act="start">${ICON.car} Ich fahre selbst – Fahrt starten</button>`;
+    <button class="btn ghost" data-act="start">${ICON.car} Ich fahre selbst – Fahrt starten</button>
+    <button class="btn ghost" data-act="plan-new">Fahrt planen & Freunde fragen</button>`;
 }
 
 function driveCard(r) {
@@ -778,13 +882,9 @@ function onWS(m) {
     }
     return;
   }
-  if (m.type === 'ride_started') {
-    toast(`${m.driver} fährt los`, '', { label: 'Ansehen', fn: () => openDetail(m.rideId) });
-    notify(`${m.driver} fährt los`, 'Tippe hier, um mitzufahren.');
-  } else if (m.msg) {
-    toast(m.msg);
-    notify('TankiGeldi', m.msg);
-  }
+  if (m.type === 'ride_started') toast(`${m.driver} fährt los`, '', { label: 'Ansehen', fn: () => openDetail(m.rideId) });
+  else if (m.msg) toast(m.msg);
+  if (m.type === 'plan') loadFeed();
   if (/^ride_/.test(m.type)) {
     loadFeed();
     if (S.detail?.ride.id === m.rideId) m.type === 'ride_deleted' ? closeDetail() : openDetail(m.rideId, true);
@@ -1194,6 +1294,7 @@ function renderDetail() {
       ${calc.totalCost != null ? `<div class="cost-big">${eur(calc.totalCost)}</div>` : '<div class="cost-big missing">Preis fehlt</div>'}
     </div>${driver ? `<button class="pill ghost" data-act="edit-price">${calc.totalCost != null ? 'Ändern' : 'Eintragen'}</button>` : ''}</div>
     <div class="cost-meta">${r.car ? `<span><b>${esc(r.car)}</b></span>` : ''}<span>${(FUEL[r.fuel_type] || FUEL.benzin).label}</span><span><b>${price(r.fuel_price, unit)}</b></span><span><b>${dec(calc.effConsumption || r.consumption)}</b> ${unit}/100 km${calc.effConsumption ? ' (nach Fahrweise)' : ''}</span></div>
+    ${r.price_note ? `<p class="note">Preis von ${esc(r.price_note)}</p>` : ''}
     ${calc.totalCost == null && !driver ? `<p class="note">${esc(r.driver.username)} muss noch den Spritpreis eintragen.</p>` : ''}
   </div>`;
 
@@ -1242,6 +1343,8 @@ function editPriceSheet() {
       <label class="field"><span>Preis</span><div class="unit-input"><input id="p-price" inputmode="decimal" placeholder="1,799" value="${r.fuel_price ? String(r.fuel_price).replace('.', ',') : ''}"><em>€/${unit}</em></div></label>
       <label class="field"><span>Verbrauch</span><div class="unit-input"><input id="p-cons" inputmode="decimal" placeholder="7,5" value="${r.consumption ? String(r.consumption).replace('.', ',') : ''}"><em>/100 km</em></div></label>
     </div>
+    <button class="btn ghost sm" style="width:100%;margin-top:12px" data-act="stations" data-target="p-price" data-fuel="${r.fuel_type}" data-lat="${r.last_lat ?? ''}" data-lng="${r.last_lng ?? ''}">${ICON.pump} Preis von Tankstelle in der Nähe</button>
+    <div id="stations"></div>
     ${r.car ? `<p class="note">Verbrauch berechnet aus ${esc(r.car)} und deiner Fahrweise. Änderst du ihn, gilt dein Wert.</p>` : ''}
     <label class="check"><input type="checkbox" id="p-default" checked> Preis als Standard speichern</label>
     <div style="height:18px"></div>
@@ -1252,6 +1355,7 @@ async function savePrice() {
   const r = S.detail.ride;
   const type = $('p-type').value;
   const body = { fuel_type: type, fuel_price: $('p-price').value.trim() };
+  if (S.stationPick && S.stationPick.value === body.fuel_price) body.price_note = S.stationPick.note;
   const cons = $('p-cons').value.trim();
   if (cons !== $('p-cons').defaultValue || !r.car) body.consumption = cons || String(FUEL[type].cons);
   if (!body.fuel_price) return toast('Bitte einen Preis eintragen', 'err');
@@ -1350,7 +1454,9 @@ async function loadMoney() {
     }
     h += '</div>';
   }
+  h += `<div class="section"><div class="section-h"><span>Monatsabrechnung</span></div><div id="statement"></div></div>`;
   body.innerHTML = h;
+  loadStatement();
 }
 
 // ── Friends ───────────────────────────────────────────────────────────────────
@@ -1437,6 +1543,7 @@ function renderProfile() {
         ${car ? `<div class="cost-meta" style="margin-top:0"><span>Stadt <b>${dec(car.city)}</b></span><span>Land <b>${dec(car.rural)}</b></span><span>Autobahn <b>${dec(car.motorway)}</b> l/100 km</span></div>` : ''}
         <p class="note">Der Verbrauch wird pro Abschnitt aus deinem tatsächlich gefahrenen Tempo berechnet – Stadtverkehr, Landstraße und Autobahn zählen unterschiedlich. Die Werte sind Praxis-Schätzungen.</p>
         <label class="field"><span>Spritpreis</span><div class="unit-input"><input id="car-price" inputmode="decimal" placeholder="1,799" value="${m.default_price ? String(m.default_price).replace('.', ',') : ''}"><em>€/${unit}</em></div></label>
+        ${stationBtn(m.car.fuel)}
         <div style="height:14px"></div><button class="btn" data-act="save-car-price">Speichern</button>`;
     } else {
       h += `<label class="field"><span>Name (optional)</span><input id="car-name" maxlength="40" placeholder="z. B. Golf 7" value="${esc(m.car_name || '')}"></label>
@@ -1445,9 +1552,15 @@ function renderProfile() {
         <label class="field"><span>Verbrauch</span><div class="unit-input"><input id="car-cons" inputmode="decimal" placeholder="${String(FUEL[m.fuel_type]?.cons || 7.5).replace('.', ',')}" value="${m.consumption ? String(m.consumption).replace('.', ',') : ''}"><em>/100 km</em></div></label>
         <label class="field"><span>Spritpreis</span><div class="unit-input"><input id="car-price" inputmode="decimal" placeholder="1,799" value="${m.default_price ? String(m.default_price).replace('.', ',') : ''}"><em>€/${unit}</em></div></label>
       </div>
+      ${stationBtn(m.fuel_type)}
       <p class="note">Fester Verbrauch, egal wie du fährst. Nach dem Tanken einfach den Preis anpassen.</p>
       <div style="height:14px"></div><button class="btn" data-act="save-car">Speichern</button>`;
     }
+    if ((m.cons_mode === 'car' ? car?.fuel : m.fuel_type) === 'benzin') {
+      h += `<div class="switch-row"><div class="grow"><b>Sorte</b><br><small class="mu">Für automatische Preise von Tankstellen</small></div>
+        <div class="seg" style="width:150px"><button class="${m.petrol_grade !== 'e10' ? 'on' : ''}" data-act="grade" data-g="e5">E5</button><button class="${m.petrol_grade === 'e10' ? 'on' : ''}" data-act="grade" data-g="e10">E10</button></div></div>`;
+    }
+    h += `<p class="note">Fehlt bei einer Fahrt der Preis, holt die App ihn automatisch von der nächsten Tankstelle (Daten: Tankerkönig / MTS-K).</p>`;
     h += '</div>';
   }
   h += `<div class="card"><div class="card-h">Zahlungsdaten</div>
@@ -1458,7 +1571,7 @@ function renderProfile() {
     <div style="height:14px"></div><button class="btn ghost" data-act="save-pay">Zahlungsdaten speichern</button></div>`;
   h += `<div class="card"><div class="card-h">App</div>
     <div class="row"><div class="grow"><b>Benachrichtigungen</b><small>Wenn Freunde losfahren oder dich hinzufügen</small></div>
-      ${!('Notification' in window) ? '<span class="mu">nicht verfügbar</span>' : notifOn ? '<span class="pill done">An</span>' : Notification.permission === 'denied' ? '<span class="mu">blockiert</span>' : '<button class="pill" data-act="notif">Aktivieren</button>'}</div>
+      ${!pushSupported() ? `<span class="mu">${isIOS && !isStandalone() ? 'nur in der App' : 'nicht verfügbar'}</span>` : notifOn ? '<button class="pill ghost" data-act="push-test">Testen</button>' : Notification.permission === 'denied' ? '<span class="mu">blockiert</span>' : '<button class="pill" data-act="notif">Aktivieren</button>'}</div>
     <div class="row"><div class="grow"><b>Vollbild-App</b><small>${isStandalone() ? 'Installiert' : 'Zum Startbildschirm hinzufügen'}</small></div>
       ${isStandalone() ? '<span class="pill done">Aktiv</span>' : '<button class="pill" data-act="install">Anleitung</button>'}</div>
     <div class="row"><div class="grow"><b>Standort</b><small>${S.gps === 'denied' ? 'Blockiert – in den Browser-Einstellungen erlauben' : 'Wird nur während deiner eigenen Fahrten an Freunde geteilt'}</small></div></div>
@@ -1642,6 +1755,79 @@ function statsPage(st) {
   return html;
 }
 
+// ── Fuel stations nearby (Tankerkönig) ───────────────────────────────────────
+function stationBtn(fuel) {
+  if (fuel !== 'benzin' && fuel !== 'diesel') return '';
+  return `<button class="btn ghost sm" style="width:100%;margin-top:12px" data-act="stations" data-target="car-price" data-fuel="${fuel}">${ICON.pump} Preis von Tankstelle in der Nähe</button><div id="stations"></div>`;
+}
+
+async function showStations(el) {
+  const box = $('stations');
+  const fuel = el.dataset.fuel;
+  if (fuel !== 'benzin' && fuel !== 'diesel') return toast('Für diese Kraftstoffart gibt es keine Tankstellenpreise', 'err');
+  const lat = +el.dataset.lat || S.pos?.lat, lng = +el.dataset.lng || S.pos?.lng;
+  if (!lat) return toast('Noch kein Standort – GPS einschalten', 'err');
+  box.innerHTML = '<div class="empty">Suche Tankstellen …</div>';
+  const r = await api('GET', `/api/fuel/nearby?lat=${lat}&lng=${lng}`);
+  if (r.error) { box.innerHTML = `<div class="empty">${esc(r.error)}</div>`; return; }
+  if (!r.available) { box.innerHTML = '<div class="empty">Tankstellenpreise sind auf dem Server noch nicht eingerichtet.</div>'; return; }
+  const grade = fuel === 'diesel' ? 'diesel' : S.me.petrol_grade === 'e10' ? 'e10' : 'e5';
+  const list = r.stations.filter(st => st[grade]);
+  box.innerHTML = list.length ? list.map((st, i) => `<button class="row tap" style="width:100%;text-align:left" data-act="station-pick" data-i="${i}" data-target="${el.dataset.target}">
+      <div class="grow"><b class="ell">${esc(st.name)}</b><small class="ell">${esc(st.street || st.place || '')} · ${dec(st.dist)} km</small></div>
+      <div class="amount" style="font-size:18px">${price(st[grade], 'l')}</div></button>`).join('') + '<p class="note">Preise: Tankerkönig (MTS-K), CC BY 4.0</p>'
+    : '<div class="empty">Keine geöffnete Tankstelle im Umkreis von 5 km gefunden.</div>';
+  S.stationList = list.map(st => ({ value: String(st[grade]).replace('.', ','), note: `${st.name}, ${st.street || st.place} (Tankerkönig)` }));
+}
+
+// ── Monthly statement ─────────────────────────────────────────────────────────
+function monthKey(offset) {
+  const d = new Date();
+  d.setDate(1);
+  d.setMonth(d.getMonth() - offset);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+const monthLabel = k => new Date(k + '-15').toLocaleDateString('de-DE', { month: 'long', year: 'numeric' });
+
+async function loadStatement() {
+  const box = $('statement');
+  if (!box) return;
+  S.stMonth ||= monthKey(0);
+  const r = await api('GET', `/api/statement?month=${S.stMonth}`);
+  if (r.error) { box.innerHTML = `<div class="empty">${esc(r.error)}</div>`; return; }
+  S.statement = r;
+  const chips = [0, 1, 2, 3, 4, 5].map(monthKey).map(k => `<button class="${k === S.stMonth ? 'on' : ''}" data-act="st-month" data-m="${k}">${new Date(k + '-15').toLocaleDateString('de-DE', { month: 'short' })}</button>`).join('');
+  let h = `<div class="seg month-seg">${chips}</div>
+    <div class="stats" style="margin-top:12px">
+      <div class="stat"><b>${r.rides}</b><span>Fahrten</span></div>
+      <div class="stat"><b>${kmNum(r.km)}<small>km</small></b><span>Strecke</span></div>
+      <div class="stat hi"><b>${dec(r.myCost, 2)}<small>€</small></b><span>Dein Sprit</span></div>
+    </div>`;
+  if (r.fuelSpent) h += `<p class="note" style="margin-top:0">Als Fahrer hast du ${eur(r.fuelSpent)} Sprit verfahren.</p>`;
+  if (r.missing) h += `<p class="note" style="color:var(--amber)">${r.missing} ${r.missing === 1 ? 'Fahrt hat' : 'Fahrten haben'} noch keinen Spritpreis.</p>`;
+  h += r.people.length ? r.people.map(p => {
+    const net = p.toMe - p.fromMe, open = p.openToMe - p.openFromMe;
+    return `<div class="row">${av(p.who, 40)}<div class="grow"><b class="ell">${esc(p.who.username)}</b>
+      <small>${p.toMe ? `bekommst ${eur(p.toMe)}` : ''}${p.toMe && p.fromMe ? ' · ' : ''}${p.fromMe ? `zahlst ${eur(p.fromMe)}` : ''}</small></div>
+      <div class="amount ${net >= 0 ? 'in' : 'out'}">${eur(Math.abs(net))}<small>${Math.abs(open) < 0.005 ? 'erledigt' : `${eur(Math.abs(open))} offen`}</small></div></div>`;
+  }).join('') : '<div class="empty">In diesem Monat keine gemeinsamen Kosten.</div>';
+  if (r.rides) h += `<div style="height:12px"></div><button class="btn ghost" data-act="st-share">${ICON.share} Abrechnung teilen</button>`;
+  box.innerHTML = h;
+}
+
+async function shareStatement() {
+  const r = S.statement;
+  const lines = [`TankiGeldi – Abrechnung ${monthLabel(r.month)}`, `${S.me.username}: ${r.rides} Fahrten, ${kmNum(r.km)} km, Spritanteil ${eur(r.myCost)}`, ''];
+  for (const p of r.people) {
+    const net = p.toMe - p.fromMe, open = p.openToMe - p.openFromMe;
+    lines.push(`${p.who.username}: ${net >= 0 ? 'bekommt ' + S.me.username : 'bekommt von ' + S.me.username} ${eur(Math.abs(net))}${Math.abs(open) < 0.005 ? ' ✓ erledigt' : ` (offen ${eur(Math.abs(open))})`}`);
+  }
+  const text = lines.join('\n');
+  if (navigator.share) { try { await navigator.share({ text }); return; } catch (e) { if (e.name === 'AbortError') return; } }
+  try { await navigator.clipboard.writeText(text); toast('Abrechnung kopiert – jetzt in WhatsApp einfügen'); }
+  catch { toast('Teilen nicht möglich', 'err'); }
+}
+
 // ── Event delegation ──────────────────────────────────────────────────────────
 const ACT = {
   'auth-mode': el => setAuthMode(el.dataset.mode),
@@ -1707,6 +1893,17 @@ const ACT = {
     if (!r.error) loadMoney();
   }),
   invite: () => invite(),
+  stations: el => showStations(el),
+  'station-pick': el => {
+    const pick = S.stationList[+el.dataset.i];
+    $(el.dataset.target).value = pick.value;
+    S.stationPick = pick;
+    $('stations').innerHTML = '';
+    toast('Preis übernommen');
+  },
+  grade: el => saveMe({ petrol_grade: el.dataset.g }),
+  'st-month': el => { S.stMonth = el.dataset.m; loadStatement(); },
+  'st-share': () => shareStatement(),
   user: el => openUser(+el.dataset.uid),
   'user-close': () => { $('user').hidden = true; },
   'all-users': () => allUsersSheet(),
@@ -1771,11 +1968,21 @@ const ACT = {
   color: async el => { const r = await saveMe({ avatar_color: el.dataset.c, avatar_data: null }); if (!r.error) closeSheet(); },
   photo: () => $('photo-input').click(),
   'photo-remove': async () => { const r = await saveMe({ avatar_data: null }); if (!r.error) closeSheet(); },
-  notif: async () => {
-    const p = await Notification.requestPermission();
-    if (p === 'granted') toast('Benachrichtigungen aktiviert');
-    renderProfile();
+  notif: () => enablePush(),
+  'push-test': () => call('POST', '/api/push/test', null, 'Test-Benachrichtigung gesendet'),
+  'plan-new': () => planSheet(),
+  plan: el => openPlan(+el.dataset.id),
+  'plan-save': async () => {
+    const when = new Date($('plan-when').value).getTime() / 1000;
+    const r = await call('POST', '/api/plans', { destination: $('plan-dest').value, depart_at: when, seats: $('plan-seats').value, note: $('plan-note').value }, 'Geplant – deine Freunde werden benachrichtigt');
+    if (!r.error) { closeSheet(); loadFeed(); }
   },
+  'plan-join': async el => { const r = await call('POST', `/api/plans/${el.dataset.id}/join`, null, 'Du bist angemeldet'); if (!r.error) { closeSheet(); loadFeed(); } },
+  'plan-leave': async el => { const r = await call('POST', `/api/plans/${el.dataset.id}/leave`, null, 'Abgemeldet'); if (!r.error) { closeSheet(); loadFeed(); } },
+  'plan-cancel': el => confirmSheet('Fahrt absagen?', 'Alle Angemeldeten bekommen eine Nachricht.', 'Absagen', async () => {
+    const r = await call('DELETE', `/api/plans/${el.dataset.id}`, null, 'Fahrt abgesagt');
+    if (!r.error) loadFeed();
+  }, true),
   install: () => installSheet(),
   'install-hide': () => { lsSet('installHidden', '1'); closeSheet(); renderHome(); },
   logout: () => confirmSheet('Abmelden?', 'Du kannst dich jederzeit wieder anmelden.', 'Abmelden', () => logout(), true),

@@ -381,3 +381,5 @@ sup { font-size: .6em; vertical-align: .45em; margin-left: 1px; }
 .badge-item b { display: block; color: var(--ac); font: 800 17px/1.1 'Barlow Condensed', sans-serif; text-transform: uppercase; }
 .badge-item small { color: var(--mu); font-size: 12px; }
 .card .stats:last-child { margin-bottom: 0; }
+.month-seg { grid-auto-columns: minmax(0, 1fr); overflow-x: auto; }
+.month-seg button { font-size: 13px; padding: 0 4px; }
