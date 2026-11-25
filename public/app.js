@@ -341,7 +341,7 @@ function checkGpsAlive() {
   S.gpsProbing = true;
   navigator.geolocation.getCurrentPosition(p => { S.gpsProbing = false; onPos(p); }, e => {
     S.gpsProbing = false;
-    S.gps = e.code === 1 ? 'denied' : 'weak';
+    S.gps = e.code === 1 ? 'denied' : 'lost';
     updateChip();
     if (S.tab === 'home') renderHome();
     startGPS(true);
@@ -576,7 +576,7 @@ async function syncRouteLine() {
 function updateChip() {
   const c = $('gps-chip');
   if (amDriving()) { c.className = 'chip drive'; c.textContent = 'Fahrt läuft'; return; }
-  const map = { off: ['warn', 'GPS startet …'], ok: ['ok', 'GPS aktiv'], weak: ['warn', 'Kein GPS-Signal'], denied: ['bad', 'Standort blockiert'], none: ['bad', 'Kein GPS'] };
+  const map = { off: ['warn', 'GPS startet …'], ok: ['ok', 'GPS aktiv'], weak: ['warn', 'Schwaches GPS'], lost: ['bad', 'Kein GPS-Signal'], denied: ['bad', 'Standort blockiert'], none: ['bad', 'Kein GPS'] };
   const [cls, txt] = map[S.gps] || map.off;
   c.className = 'chip ' + cls;
   c.textContent = txt;
@@ -590,7 +590,7 @@ function startGPS(force = false) {
   if (S.watch != null) navigator.geolocation.clearWatch(S.watch);
   clearTimeout(S.gpsRetry);
   S.watch = navigator.geolocation.watchPosition(onPos, e => {
-    S.gps = e.code === 1 ? 'denied' : 'weak';
+    S.gps = e.code === 1 ? 'denied' : 'lost';
     updateChip();
     if (S.tab === 'home') renderHome();
     if (e.code !== 3) {
