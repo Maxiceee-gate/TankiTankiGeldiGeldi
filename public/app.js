@@ -1543,7 +1543,7 @@ function renderProfile() {
         ${car ? `<div class="cost-meta" style="margin-top:0"><span>Stadt <b>${dec(car.city)}</b></span><span>Land <b>${dec(car.rural)}</b></span><span>Autobahn <b>${dec(car.motorway)}</b> l/100 km</span><span>Tank <b>${car.tank} l</b></span></div>` : ''}
         <p class="note">Der Verbrauch wird pro Abschnitt aus deinem tatsächlich gefahrenen Tempo berechnet – Stadtverkehr, Landstraße und Autobahn zählen unterschiedlich. Die Werte sind Praxis-Schätzungen.</p>
         <label class="field"><span>Spritpreis</span><div class="unit-input"><input id="car-price" inputmode="decimal" placeholder="1,799" value="${m.default_price ? String(m.default_price).replace('.', ',') : ''}"><em>€/${unit}</em></div></label>
-        ${stationBtn(m.car.fuel)}
+        ${stationBtn(myFuel())}
         <div style="height:14px"></div><button class="btn" data-act="save-car-price">Speichern</button>`;
     } else {
       h += `<label class="field"><span>Name (optional)</span><input id="car-name" maxlength="40" placeholder="z. B. Golf 7" value="${esc(m.car_name || '')}"></label>
