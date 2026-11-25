@@ -498,11 +498,8 @@ route('GET', '/api/rides/:id', true, ({ user, params }) => {
   const pay = mine ? payInfo(q.userById.get(ride.driver_id)) : null;
   const points = db.prepare('SELECT lat, lng FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id).map(p => [p.lat, p.lng]);
   const card = rideCard(ride, user.id, parts);
-  let track = null, zones = null;
-  if (ride.driver_id === user.id || mine) {
-    track = db.prepare('SELECT lat, lng, speed, ts FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id).map(p => [p.lat, p.lng, p.speed, p.ts]);
-    zones = track.length > 1 ? rideZones(ride, track) : null;
-  }
+  const track = db.prepare('SELECT lat, lng, speed, ts FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id).map(p => [p.lat, p.lng, p.speed, p.ts]);
+  const zones = track.length > 1 ? rideZones(ride, track) : null;
   card.participants.forEach(p => { p.live_share = calc.shares[p.id]; });
   return {
     ride: card, points, joinable: ride.status === 'active' || ride.ended_at > now() - JOIN_WINDOW,
@@ -787,10 +784,26 @@ route('GET', '/api/users/:id/stats', true, ({ user, params }) => {
     };
   }
 
+  // Their rides the viewer may open: viewer drove, rode along, or is a friend of the driver
+  const rides = db.prepare(`
+    SELECT r.* FROM rides r WHERE r.status = 'ended'
+      AND (r.driver_id = @u OR EXISTS (SELECT 1 FROM ride_participants p WHERE p.ride_id = r.id AND p.user_id = @u))
+      AND (r.driver_id = @me OR EXISTS (SELECT 1 FROM ride_participants p WHERE p.ride_id = r.id AND p.user_id = @me)
+        OR EXISTS (SELECT 1 FROM friendships f WHERE f.status = 'accepted'
+          AND ((f.requester_id = @me AND f.addressee_id = r.driver_id) OR (f.addressee_id = @me AND f.requester_id = r.driver_id))))
+    ORDER BY r.started_at DESC LIMIT 50`).all({ u: u.id, me: user.id }).map(r => {
+    const parts = q.parts.all(r.id);
+    const p = parts.find(x => x.user_id === u.id);
+    return {
+      id: r.id, name: r.name, started_at: r.started_at, ended_at: r.ended_at, driver: pub(q.userById.get(r.driver_id)),
+      km: p ? (p.to_km ?? r.total_distance) - (p.from_km || 0) : r.total_distance, people: parts.length + 1,
+    };
+  });
+
   const buddyUser = buddy ? q.userById.get(buddy.other) : null;
   return {
     user: { ...pub(u), role: u.role, since: u.created_at, car: carLabel(CAR_BY_ID.get(u.car_id)) || u.car_name || null },
-    driven, ridden, carried, topSpeed, days, hours,
+    driven, ridden, carried, topSpeed, days, hours, rides,
     buddy: buddyUser ? { ...pub(buddyUser), count: buddy.c } : null,
     together,
   };

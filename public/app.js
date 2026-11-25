@@ -1629,6 +1629,14 @@ function statsPage(st) {
     </div>`;
   }
 
+  html += `<div class="card"><div class="card-h">${self ? 'Deine Fahrten' : `Fahrten von ${esc(u.username)}`}</div>
+    ${st.rides.length ? st.rides.map(x => {
+      const drove = x.driver.id === u.id;
+      const title = x.name ? esc(x.name) : drove ? (self ? 'Selbst gefahren' : `${esc(u.username)} ist gefahren`) : `Mit ${isMe(x.driver) ? 'dir' : esc(x.driver.username)}`;
+      return `<div class="row tap" data-act="ride" data-id="${x.id}">${av(x.driver, 36)}<div class="grow"><b class="ell">${title}</b>
+        <small>${dateStr(x.started_at)}, ${timeStr(x.started_at)} · ${kmNum(x.km)} km · ${dur(x.ended_at - x.started_at)}${x.people > 1 ? ` · ${x.people} Pers.` : ''}</small></div>${ICON.chev}</div>`;
+    }).join('') : '<div class="empty">Noch keine Fahrten, die du sehen kannst.</div>'}</div>`;
+
   html += `<div class="card"><div class="card-h">Abzeichen</div>
     ${badges.length ? `<div class="badges">${badges.map(b => `<div class="badge-item"><b>${b[1]}</b><small>${b[2]}</small></div>`).join('')}</div>` : '<div class="empty">Noch keine – einfach mehr fahren.</div>'}</div>`;
   return html;
