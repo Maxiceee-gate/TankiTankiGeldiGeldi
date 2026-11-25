@@ -287,6 +287,8 @@ async function start() {
     return;
   }
   S.me = r.me;
+  const cfg = await api('GET', '/api/config');
+  S.cfg = cfg.error ? {} : cfg;
   $('auth').hidden = true;
   $('tabbar').hidden = false;
   restoreOutbox();
@@ -335,6 +337,7 @@ function onVisible() {
 
 function tick() {
   if (!S.me) return;
+  if (isNight() !== S.night) refreshBaseMaps();
   flush();
   const cur = currentRide();
   if (cur && isMe(cur.driver)) checkStop();
@@ -494,13 +497,111 @@ function rideRow(r) {
     ${btn}</div>`;
 }
 
+// ── Base map: Google (day/night) with automatic OpenStreetMap fallback ─────────
+const DARK_MAP = [
+  { elementType: 'geometry', stylers: [{ color: '#1d2018' }] },
+  { elementType: 'labels.text.stroke', stylers: [{ color: '#1d2018' }] },
+  { elementType: 'labels.text.fill', stylers: [{ color: '#8d958a' }] },
+  { featureType: 'administrative.locality', elementType: 'labels.text.fill', stylers: [{ color: '#c9cfc3' }] },
+  { featureType: 'poi', stylers: [{ visibility: 'off' }] },
+  { featureType: 'road', elementType: 'geometry', stylers: [{ color: '#33382f' }] },
+  { featureType: 'road', elementType: 'geometry.stroke', stylers: [{ color: '#20241d' }] },
+  { featureType: 'road.highway', elementType: 'geometry', stylers: [{ color: '#4a5240' }] },
+  { featureType: 'road.highway', elementType: 'labels.text.fill', stylers: [{ color: '#d6dccf' }] },
+  { featureType: 'transit', stylers: [{ visibility: 'off' }] },
+  { featureType: 'water', elementType: 'geometry', stylers: [{ color: '#0e1a1f' }] },
+  { featureType: 'water', elementType: 'labels.text.fill', stylers: [{ color: '#4e6670' }] },
+  { featureType: 'landscape.natural', elementType: 'geometry', stylers: [{ color: '#1a1e16' }] },
+];
+
+// Sunset/sunrise for the current position (NOAA approximation, good to a few minutes)
+function isNight(d = new Date()) {
+  let p = S.pos;
+  if (!p) { try { const l = JSON.parse(lsGet('lastPos') || 'null'); if (l) p = { lat: l[0], lng: l[1] }; } catch { /* ignore */ } }
+  p = p || { lat: 51, lng: 10 };
+  const rad = Math.PI / 180;
+  const day = (Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()) - Date.UTC(d.getUTCFullYear(), 0, 0)) / 864e5;
+  const g = 2 * Math.PI / 365 * (day - 1);
+  const eq = 229.18 * (0.000075 + 0.001868 * Math.cos(g) - 0.032077 * Math.sin(g) - 0.014615 * Math.cos(2 * g) - 0.040849 * Math.sin(2 * g));
+  const decl = 0.006918 - 0.399912 * Math.cos(g) + 0.070257 * Math.sin(g) - 0.006758 * Math.cos(2 * g) + 0.000907 * Math.sin(2 * g);
+  const cosHa = (Math.cos(90.833 * rad) - Math.sin(p.lat * rad) * Math.sin(decl)) / (Math.cos(p.lat * rad) * Math.cos(decl));
+  if (cosHa > 1) return true;
+  if (cosHa < -1) return false;
+  const ha = Math.acos(cosHa) / rad;
+  const noon = 720 - 4 * p.lng - eq;
+  const m = d.getUTCHours() * 60 + d.getUTCMinutes();
+  return m < noon - 4 * ha || m > noon + 4 * ha;
+}
+
+let googleLoad = null;
+function loadGoogle(key) {
+  googleLoad ||= new Promise((resolve, reject) => {
+    window.__tankiGm = resolve;
+    window.gm_authFailure = () => { S.googleFailed = true; refreshBaseMaps(); };
+    const s1 = document.createElement('script');
+    s1.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(key)}&v=weekly&loading=async&callback=__tankiGm`;
+    s1.async = true;
+    s1.onerror = reject;
+    document.head.append(s1);
+    setTimeout(() => reject(new Error('timeout')), 12000);
+  }).then(() => new Promise((resolve, reject) => {
+    const s2 = document.createElement('script');
+    s2.src = 'https://unpkg.com/leaflet.gridlayer.googlemutant@0.13.5/dist/Leaflet.GoogleMutant.js';
+    s2.crossOrigin = 'anonymous';
+    s2.onload = resolve;
+    s2.onerror = reject;
+    document.head.append(s2);
+  }));
+  return googleLoad;
+}
+
+async function applyBase(map) {
+  if (!map) return;
+  const night = isNight();
+  const cur = map._tankiBase;
+  if (S.cfg?.googleKey && !S.googleFailed) {
+    if (cur?.kind === 'google') {
+      cur.layer._mutant?.setOptions({ styles: night ? DARK_MAP : [] });
+      return;
+    }
+    if (!map._tankiTicket) {
+      map._tankiTicket = true;
+      const t = await api('POST', '/api/maps/ticket');
+      if (t.ok) {
+        try {
+          await loadGoogle(S.cfg.googleKey);
+          if (!S.googleFailed) {
+            const layer = L.gridLayer.googleMutant({ type: 'roadmap', maxZoom: 21, styles: night ? DARK_MAP : [] }).addTo(map);
+            map._tankiBase?.layer.remove();
+            map._tankiBase = { kind: 'google', layer };
+            map.getContainer().classList.remove('osm-night');
+            return;
+          }
+        } catch { S.googleFailed = true; }
+      }
+    }
+  }
+  if (map._tankiBase?.kind !== 'osm') {
+    const layer = L.tileLayer(TILES, { maxZoom: 19, crossOrigin: true }).addTo(map);
+    map._tankiBase?.layer.remove();
+    map._tankiBase = { kind: 'osm', layer };
+  }
+  map.getContainer().classList.toggle('osm-night', night);
+}
+
+function refreshBaseMaps() {
+  S.night = isNight();
+  applyBase(S.map);
+  applyBase(S.dmap);
+}
+
 // ── Map ───────────────────────────────────────────────────────────────────────
 function initMap() {
   if (S.map || !window.L) return;
   let last = null;
   try { last = JSON.parse(lsGet('lastPos') || 'null'); } catch { /* ignore */ }
   S.map = L.map('map', { zoomControl: false, attributionControl: false }).setView(last || [51.16, 10.45], last ? 15 : 6);
-  L.tileLayer(TILES, { maxZoom: 19, crossOrigin: true }).addTo(S.map);
+  applyBase(S.map);
   S.map.on('dragstart', () => { S.follow = false; });
 }
 
@@ -1120,7 +1221,7 @@ function drawDetailMap() {
   if (!window.L) return;
   if (!S.dmap) {
     S.dmap = L.map('detail-map', { zoomControl: false, attributionControl: false, preferCanvas: true });
-    L.tileLayer(TILES, { maxZoom: 19, crossOrigin: true }).addTo(S.dmap);
+    applyBase(S.dmap);
     S.dlayer = L.layerGroup().addTo(S.dmap);
   }
   S.dmap.invalidateSize();

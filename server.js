@@ -14,6 +14,9 @@ const JOIN_WINDOW = 30 * 60;
 const STALE_AFTER = 15 * 60;
 const DEFAULT_CONSUMPTION = { benzin: 7.5, diesel: 6.0, lpg: 9.5, elektro: 18 };
 const FUEL_TYPES = Object.keys(DEFAULT_CONSUMPTION);
+const GOOGLE_KEY = process.env.GOOGLE_MAPS_KEY || null;
+// Stay below Google's 10,000 free map loads per month; afterwards clients fall back to OpenStreetMap
+const GOOGLE_MONTHLY_LIMIT = +process.env.GOOGLE_MAPS_MONTHLY_LIMIT || 9000;
 const COLORS = ['#C8F03C', '#5CE1E6', '#FF8A5B', '#B69CFF', '#FFD25E', '#6EE7A8', '#FF6B9A', '#7AA7FF'];
 
 // Real-world consumption (l/100 km) per car: city, rural (~80 km/h), motorway (~130 km/h)
@@ -140,6 +143,7 @@ db.exec(`
     speed REAL DEFAULT 0,
     ts INTEGER DEFAULT (unixepoch())
   );
+  CREATE TABLE IF NOT EXISTS counters (key TEXT PRIMARY KEY, value INTEGER NOT NULL DEFAULT 0);
   CREATE TABLE IF NOT EXISTS friendships (
     id INTEGER PRIMARY KEY,
     requester_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -794,6 +798,17 @@ route('GET', '/api/users/:id/stats', true, ({ user, params }) => {
     buddy: buddyUser ? { ...pub(buddyUser), count: buddy.c } : null,
     together,
   };
+});
+
+route('GET', '/api/config', true, () => ({ googleKey: GOOGLE_KEY }));
+
+route('POST', '/api/maps/ticket', true, () => {
+  if (!GOOGLE_KEY) return { ok: false };
+  const key = 'gmaps-' + new Date().toISOString().slice(0, 7);
+  const row = db.prepare('SELECT value FROM counters WHERE key = ?').get(key);
+  if ((row?.value || 0) >= GOOGLE_MONTHLY_LIMIT) return { ok: false };
+  db.prepare('INSERT INTO counters (key, value) VALUES (?, 1) ON CONFLICT(key) DO UPDATE SET value = value + 1').run(key);
+  return { ok: true };
 });
 
 route('GET', '/api/cars', false, () => ({ cars: CARS }));

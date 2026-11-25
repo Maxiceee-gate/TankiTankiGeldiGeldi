@@ -168,7 +168,7 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 /* ── Map / home ────────────────────────────────────────────────────────── */
 #map, #detail-map { position: absolute; inset: 0; background: #0E100D; }
 .leaflet-container { font-family: 'Barlow', sans-serif; background: #0E100D; }
-.leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.92) contrast(.88) saturate(.35); }
+.osm-night .leaflet-tile-pane { filter: invert(1) hue-rotate(180deg) brightness(.92) contrast(.88) saturate(.35); }
 .leaflet-control-attribution { background: rgba(11, 12, 10, .7) !important; color: var(--mu) !important; font-size: 10px; }
 .leaflet-control-attribution a { color: var(--mu) !important; }
 .leaflet-div-icon { background: none; border: 0; }
