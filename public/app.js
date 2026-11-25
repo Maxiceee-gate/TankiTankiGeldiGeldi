@@ -327,6 +327,7 @@ function showTab(tab) {
 
 function onVisible() {
   if (document.hidden || !S.me) return;
+  if (S.gps !== 'ok' || !S.pos || nowS() - S.pos.ts > 60) startGPS(true);
   connectWS();
   loadFeed();
   if (S.tab === 'money') loadMoney();
@@ -496,8 +497,10 @@ function rideRow(r) {
 // ── Map ───────────────────────────────────────────────────────────────────────
 function initMap() {
   if (S.map || !window.L) return;
-  S.map = L.map('map', { zoomControl: false, attributionControl: false }).setView([51.16, 10.45], 6);
-  L.tileLayer(TILES, { maxZoom: 19 }).addTo(S.map);
+  let last = null;
+  try { last = JSON.parse(lsGet('lastPos') || 'null'); } catch { /* ignore */ }
+  S.map = L.map('map', { zoomControl: false, attributionControl: false }).setView(last || [51.16, 10.45], last ? 15 : 6);
+  L.tileLayer(TILES, { maxZoom: 19, crossOrigin: true }).addTo(S.map);
   S.map.on('dragstart', () => { S.follow = false; });
 }
 
@@ -564,13 +567,22 @@ function updateChip() {
 }
 
 // ── GPS & ride detection ──────────────────────────────────────────────────────
-function startGPS() {
-  if (!navigator.geolocation) { S.gps = 'none'; updateChip(); return; }
-  if (S.watch != null) return;
+// Location turned off makes browsers end the watch for good, so restart it until it delivers again.
+function startGPS(force = false) {
+  if (!navigator.geolocation || !S.me) { if (!navigator.geolocation) { S.gps = 'none'; updateChip(); } return; }
+  if (S.watch != null && !force) return;
+  if (S.watch != null) navigator.geolocation.clearWatch(S.watch);
+  clearTimeout(S.gpsRetry);
   S.watch = navigator.geolocation.watchPosition(onPos, e => {
     S.gps = e.code === 1 ? 'denied' : 'weak';
     updateChip();
-    if (e.code === 1 && S.tab === 'home') renderHome();
+    if (S.tab === 'home') renderHome();
+    if (e.code !== 3) {
+      navigator.geolocation.clearWatch(S.watch);
+      S.watch = null;
+      clearTimeout(S.gpsRetry);
+      S.gpsRetry = setTimeout(startGPS, 5000);
+    }
   }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 30000 });
 }
 
@@ -593,6 +605,8 @@ function onPos(p) {
     }
   }
   S.pos = { ...here, ts, kmh, acc: c.accuracy };
+  if (S.gpsRetry) { clearTimeout(S.gpsRetry); S.gpsRetry = null; }
+  if (!S.lastSaved || Date.now() - S.lastSaved > 20000) { S.lastSaved = Date.now(); lsSet('lastPos', JSON.stringify([here.lat, here.lng])); }
   moveMe();
   if (c.accuracy > 80) return;
 
@@ -1106,7 +1120,7 @@ function drawDetailMap() {
   if (!window.L) return;
   if (!S.dmap) {
     S.dmap = L.map('detail-map', { zoomControl: false, attributionControl: false, preferCanvas: true });
-    L.tileLayer(TILES, { maxZoom: 19 }).addTo(S.dmap);
+    L.tileLayer(TILES, { maxZoom: 19, crossOrigin: true }).addTo(S.dmap);
     S.dlayer = L.layerGroup().addTo(S.dmap);
   }
   S.dmap.invalidateSize();
