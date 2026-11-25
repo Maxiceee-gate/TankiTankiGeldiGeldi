@@ -551,7 +551,8 @@ function idleCard() {
         : 'Automatischer Start ist aus. Starte deine Fahrt per Knopf.';
     return `<div class="hello"><h2>Hi ${name}</h2><p>${sub}</p></div>
       <button class="btn" data-act="start">${ICON.car} Fahrt jetzt starten</button>
-      <button class="btn ghost" data-act="plan-new">Fahrt planen & Freunde fragen</button>`;
+      <button class="btn ghost" data-act="plan-new">Fahrt planen & Freunde fragen</button>
+      <button class="link" data-act="tanked">Gerade getankt? Preis aktualisieren (${S.me.default_price ? price(S.me.default_price, fuelUnit(myFuel())).replace(/<\/?sup>/g, '') : 'fehlt'})</button>`;
   }
   return `<div class="hello"><h2>Hi ${name}</h2><p>Sobald ein Freund losfährt, siehst du ihn hier und auf der Karte. Mit einem Tipp fährst du mit – sitzt du schon im Auto, fragt dich die App von selbst.</p></div>
     <button class="btn ghost" data-act="start">${ICON.car} Ich fahre selbst – Fahrt starten</button>
@@ -1337,14 +1338,12 @@ function editPriceSheet() {
   const r = S.detail.ride;
   const opts = Object.entries(FUEL).map(([k, v]) => `<option value="${k}" ${k === r.fuel_type ? 'selected' : ''}>${v.label}</option>`).join('');
   const unit = fuelUnit(r.fuel_type);
-  openSheet(`<h3>Spritdaten</h3><p>Der Preis von deiner letzten Tankfüllung reicht.</p>
+  openSheet(`<h3>Spritdaten</h3><p>Trag den Preis ein, den du beim letzten Tanken bezahlt hast.</p>
     <label class="field"><span>Kraftstoff</span><select id="p-type">${opts}</select></label>
     <div class="field-row">
       <label class="field"><span>Preis</span><div class="unit-input"><input id="p-price" inputmode="decimal" placeholder="1,799" value="${r.fuel_price ? String(r.fuel_price).replace('.', ',') : ''}"><em>€/${unit}</em></div></label>
       <label class="field"><span>Verbrauch</span><div class="unit-input"><input id="p-cons" inputmode="decimal" placeholder="7,5" value="${r.consumption ? String(r.consumption).replace('.', ',') : ''}"><em>/100 km</em></div></label>
     </div>
-    <button class="btn ghost sm" style="width:100%;margin-top:12px" data-act="stations" data-target="p-price" data-fuel="${r.fuel_type}" data-lat="${r.last_lat ?? ''}" data-lng="${r.last_lng ?? ''}">${ICON.pump} Preis von Tankstelle in der Nähe</button>
-    <div id="stations"></div>
     ${r.car ? `<p class="note">Verbrauch berechnet aus ${esc(r.car)} und deiner Fahrweise. Änderst du ihn, gilt dein Wert.</p>` : ''}
     <label class="check"><input type="checkbox" id="p-default" checked> Preis als Standard speichern</label>
     <div style="height:18px"></div>
@@ -1355,7 +1354,6 @@ async function savePrice() {
   const r = S.detail.ride;
   const type = $('p-type').value;
   const body = { fuel_type: type, fuel_price: $('p-price').value.trim() };
-  if (S.stationPick && S.stationPick.value === body.fuel_price) body.price_note = S.stationPick.note;
   const cons = $('p-cons').value.trim();
   if (cons !== $('p-cons').defaultValue || !r.car) body.consumption = cons || String(FUEL[type].cons);
   if (!body.fuel_price) return toast('Bitte einen Preis eintragen', 'err');
@@ -1560,7 +1558,7 @@ function renderProfile() {
       h += `<div class="switch-row"><div class="grow"><b>Sorte</b><br><small class="mu">Für automatische Preise von Tankstellen</small></div>
         <div class="seg" style="width:150px"><button class="${m.petrol_grade !== 'e10' ? 'on' : ''}" data-act="grade" data-g="e5">E5</button><button class="${m.petrol_grade === 'e10' ? 'on' : ''}" data-act="grade" data-g="e10">E10</button></div></div>`;
     }
-    h += `<p class="note">Fehlt bei einer Fahrt der Preis, holt die App ihn automatisch von der nächsten Tankstelle (Daten: Tankerkönig / MTS-K).</p>`;
+    h += `<p class="note">Zuletzt: ${lastFill()}</p>`;
     h += '</div>';
   }
   h += `<div class="card"><div class="card-h">Zahlungsdaten</div>
@@ -1755,10 +1753,28 @@ function statsPage(st) {
   return html;
 }
 
+const myFuel = () => S.me.cons_mode === 'car' && S.me.car ? S.me.car.fuel : S.me.fuel_type;
+function lastFill() {
+  const m = S.me;
+  if (!m.default_price) return 'Noch kein Spritpreis hinterlegt';
+  const days = m.price_at ? Math.floor((Date.now() / 1000 - m.price_at) / 86400) : null;
+  const when = days == null ? '' : days === 0 ? 'heute' : days === 1 ? 'gestern' : `vor ${days} Tagen`;
+  return `${price(m.default_price, fuelUnit(myFuel()))}${when ? ' · getankt ' + when : ''}${m.price_note ? ` · ${esc(m.price_note.replace(' (Tankerkönig)', ''))}` : ''}`;
+}
+
+function tankSheet() {
+  const m = S.me;
+  openSheet(`<h3>Gerade getankt?</h3><p>Trag den Preis ein, den du bezahlt hast. Er gilt für alle Fahrten ab jetzt, bis du wieder tankst.</p>
+    <p class="note" style="margin-top:-8px">Bisher: ${lastFill()}</p>
+    <label class="field"><span>Preis</span><div class="unit-input"><input id="tank-price" inputmode="decimal" placeholder="1,799" value=""><em>€/${fuelUnit(myFuel())}</em></div></label>
+    ${stationBtn(myFuel(), 'tank-price')}
+    <div style="height:14px"></div><button class="btn" data-act="tank-save">Speichern</button>`);
+}
+
 // ── Fuel stations nearby (Tankerkönig) ───────────────────────────────────────
-function stationBtn(fuel) {
+function stationBtn(fuel, target = 'car-price') {
   if (fuel !== 'benzin' && fuel !== 'diesel') return '';
-  return `<button class="btn ghost sm" style="width:100%;margin-top:12px" data-act="stations" data-target="car-price" data-fuel="${fuel}">${ICON.pump} Preis von Tankstelle in der Nähe</button><div id="stations"></div>`;
+  return `<button class="btn ghost sm" style="width:100%;margin-top:12px" data-act="stations" data-target="${target}" data-fuel="${fuel}">${ICON.pump} Preis von dieser Tankstelle</button><div id="stations"></div>`;
 }
 
 async function showStations(el) {
@@ -1770,7 +1786,7 @@ async function showStations(el) {
   box.innerHTML = '<div class="empty">Suche Tankstellen …</div>';
   const r = await api('GET', `/api/fuel/nearby?lat=${lat}&lng=${lng}`);
   if (r.error) { box.innerHTML = `<div class="empty">${esc(r.error)}</div>`; return; }
-  if (!r.available) { box.innerHTML = '<div class="empty">Tankstellenpreise sind auf dem Server noch nicht eingerichtet.</div>'; return; }
+  if (!r.available) { box.innerHTML = '<div class="empty">Die Tankstellenliste ist noch nicht freigeschaltet – trag den Preis bitte von Hand ein.</div>'; return; }
   const grade = fuel === 'diesel' ? 'diesel' : S.me.petrol_grade === 'e10' ? 'e10' : 'e5';
   const list = r.stations.filter(st => st[grade]);
   box.innerHTML = list.length ? list.map((st, i) => `<button class="row tap" style="width:100%;text-align:left" data-act="station-pick" data-i="${i}" data-target="${el.dataset.target}">
@@ -1826,6 +1842,11 @@ async function shareStatement() {
   if (navigator.share) { try { await navigator.share({ text }); return; } catch (e) { if (e.name === 'AbortError') return; } }
   try { await navigator.clipboard.writeText(text); toast('Abrechnung kopiert – jetzt in WhatsApp einfügen'); }
   catch { toast('Teilen nicht möglich', 'err'); }
+}
+
+function withNote(o) {
+  o.price_note = S.stationPick && S.stationPick.value === o.default_price ? S.stationPick.note : null;
+  return o;
 }
 
 // ── Event delegation ──────────────────────────────────────────────────────────
@@ -1910,7 +1931,14 @@ const ACT = {
   'cons-mode': el => saveMe({ cons_mode: el.dataset.mode }),
   'car-pick': () => carPickSheet(),
   'car-set': async el => { const r = await saveMe({ car_id: el.dataset.id, cons_mode: 'car' }, 'Auto gespeichert'); if (!r.error) closeSheet(); },
-  'save-car-price': () => saveMe({ default_price: $('car-price').value.trim() || null }, 'Gespeichert'),
+  'save-car-price': () => saveMe(withNote({ default_price: $('car-price').value.trim() || null }), 'Gespeichert'),
+  tanked: () => tankSheet(),
+  'tank-save': async () => {
+    const v = $('tank-price').value.trim();
+    if (!v) return toast('Bitte einen Preis eintragen', 'err');
+    const r = await saveMe(withNote({ default_price: v }), 'Neuer Spritpreis gespeichert');
+    if (!r.error) closeSheet();
+  },
   'save-pay': () => saveMe({ revolut: $('pay-revolut').value, iban: $('pay-iban').value, account_name: $('pay-name').value }, 'Zahlungsdaten gespeichert'),
   copy: async el => {
     try { await navigator.clipboard.writeText(el.dataset.v); toast('Kopiert'); }
@@ -1962,7 +1990,7 @@ const ACT = {
   role: el => saveMe({ role: el.dataset.role }),
   'save-car': () => saveMe({
     car_name: $('car-name').value, fuel_type: $('car-type').value,
-    consumption: $('car-cons').value.trim() || null, default_price: $('car-price').value.trim() || null,
+    consumption: $('car-cons').value.trim() || null, ...withNote({ default_price: $('car-price').value.trim() || null }),
   }, 'Gespeichert'),
   avatar: () => avatarSheet(),
   color: async el => { const r = await saveMe({ avatar_color: el.dataset.c, avatar_data: null }); if (!r.error) closeSheet(); },

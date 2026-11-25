@@ -183,7 +183,7 @@ db.exec(`
 ensureCols('users', {
   role: "TEXT DEFAULT 'passenger'", auto_start: 'INTEGER DEFAULT 1', car_name: 'TEXT',
   fuel_type: "TEXT DEFAULT 'benzin'", consumption: 'REAL', default_price: 'REAL', avatar_v: 'INTEGER',
-  cons_mode: "TEXT DEFAULT 'manual'", car_id: 'TEXT', petrol_grade: "TEXT DEFAULT 'e5'", revolut: 'TEXT', iban: 'TEXT', account_name: 'TEXT',
+  cons_mode: "TEXT DEFAULT 'manual'", car_id: 'TEXT', petrol_grade: "TEXT DEFAULT 'e5'", price_at: 'INTEGER', price_note: 'TEXT', revolut: 'TEXT', iban: 'TEXT', account_name: 'TEXT',
 });
 ensureCols('rides', {
   consumption: 'REAL', last_lat: 'REAL', last_lng: 'REAL', last_speed: 'REAL',
@@ -287,24 +287,6 @@ async function nearbyStations(lat, lng) {
   tkCache.set(key, { t: Date.now(), d });
   return d;
 }
-const gradeFor = (fuel, user) => fuel === 'diesel' ? 'diesel' : fuel === 'benzin' ? (user?.petrol_grade === 'e10' ? 'e10' : 'e5') : null;
-
-// Fill a missing ride price from the nearest station; failures just leave it empty
-async function autoPrice(rideId) {
-  const ride = q.ride.get(rideId);
-  if (!ride || ride.fuel_price || ride.last_lat == null) return;
-  const grade = gradeFor(ride.fuel_type, q.userById.get(ride.driver_id));
-  if (!grade) return;
-  try {
-    const st = (await nearbyStations(ride.last_lat, ride.last_lng))?.find(x => x[grade]);
-    if (!st) return;
-    const fresh = q.ride.get(rideId);
-    if (!fresh || fresh.fuel_price) return;
-    db.prepare('UPDATE rides SET fuel_price = ?, price_note = ? WHERE id = ?').run(st[grade], `${st.name}, ${st.street || st.place} (Tankerkönig)`, rideId);
-    settle(rideId);
-    send(audience(fresh), { type: 'ride_updated', rideId });
-  } catch (e) { console.error('autoPrice', e.message); }
-}
 
 function pub(u) {
   return {
@@ -317,7 +299,7 @@ function meJson(u) {
   return {
     ...pub(u), role: u.role, auto_start: !!u.auto_start, car_name: u.car_name,
     fuel_type: u.fuel_type || 'benzin', consumption: u.consumption, default_price: u.default_price,
-    cons_mode: u.cons_mode === 'car' ? 'car' : 'manual', car: CAR_BY_ID.get(u.car_id) || null, petrol_grade: u.petrol_grade === 'e10' ? 'e10' : 'e5',
+    cons_mode: u.cons_mode === 'car' ? 'car' : 'manual', car: CAR_BY_ID.get(u.car_id) || null, petrol_grade: u.petrol_grade === 'e10' ? 'e10' : 'e5', price_at: u.price_at, price_note: u.price_note,
     revolut: u.revolut, iban: u.iban, account_name: u.account_name,
   };
 }
@@ -517,7 +499,11 @@ route('PUT', '/api/me', true, ({ user, body }) => {
     u.fuel_type = body.fuel_type;
   }
   if ('consumption' in body) u.consumption = num(body.consumption, 1, 40);
-  if ('default_price' in body) u.default_price = num(body.default_price, 0.1, 5);
+  if ('default_price' in body) {
+    u.default_price = num(body.default_price, 0.1, 5);
+    u.price_at = u.default_price ? now() : null;
+    u.price_note = body.price_note ? String(body.price_note).slice(0, 120) : null;
+  }
   if ('petrol_grade' in body) u.petrol_grade = body.petrol_grade === 'e10' ? 'e10' : 'e5';
   if ('cons_mode' in body) u.cons_mode = body.cons_mode === 'car' ? 'car' : 'manual';
   if ('car_id' in body) {
@@ -603,9 +589,9 @@ route('POST', '/api/rides', true, ({ user, body }) => {
   const car = user.cons_mode === 'car' ? CAR_BY_ID.get(user.car_id) : null;
   const fuel = car ? car.fuel : user.fuel_type || 'benzin';
   const id = db.prepare(`
-    INSERT INTO rides (driver_id, fuel_type, consumption, fuel_price, started_at, last_seen, auto_started, car_id)
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, fuel, car ? car.combined : user.consumption || DEFAULT_CONSUMPTION[fuel],
-    user.default_price, started, t, body.auto ? 1 : 0, car ? car.id : null).lastInsertRowid;
+    INSERT INTO rides (driver_id, fuel_type, consumption, fuel_price, started_at, last_seen, auto_started, car_id, price_note)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`).run(user.id, fuel, car ? car.combined : user.consumption || DEFAULT_CONSUMPTION[fuel],
+    user.default_price, started, t, body.auto ? 1 : 0, car ? car.id : null, user.price_note).lastInsertRowid;
   const ride = addPoints(q.ride.get(id), pts.filter(p => +p.ts >= started));
 
   // A ride started around a planned departure takes over the plan's sign-ups
@@ -623,7 +609,6 @@ route('POST', '/api/rides', true, ({ user, body }) => {
   send(audience(ride), { type: 'ride_started', rideId: id, driver: user.username }, user.id);
   push(friendIds(user.id).filter(f => !plan || !db.prepare('SELECT 1 FROM plan_members WHERE plan_id = ? AND user_id = ?').get(plan.id, f)),
     { title: `${user.username} fährt los`, body: 'Sitzt du mit drin? Tippe zum Mitfahren.', url: `/?ride=${id}`, tag: 'ride-' + id });
-  if (!ride.fuel_price) setTimeout(() => autoPrice(id), 1000);
   return { ride: rideCard(ride, user.id) };
 });
 
@@ -635,12 +620,11 @@ route('POST', '/api/rides/:id/points', true, ({ user, params, body }) => {
   return { total_distance: ride.total_distance };
 });
 
-route('POST', '/api/rides/:id/end', true, async ({ user, params, body }) => {
+route('POST', '/api/rides/:id/end', true, ({ user, params, body }) => {
   const ride = driverRide(params.id, user.id);
   if (ride.status !== 'active') fail(409, 'Fahrt ist schon beendet.');
   if (body.points) addPoints(ride, body.points);
   endRide(ride);
-  if (!ride.fuel_price) await autoPrice(ride.id);
   return { ok: true };
 });
 
