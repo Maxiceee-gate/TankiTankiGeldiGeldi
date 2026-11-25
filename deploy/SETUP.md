@@ -48,38 +48,18 @@ Im Strato-Kundencenter (oder wo auch immer die Domain verwaltet wird):
 - Name: tankigeldi
 - Wert: (selbe IP wie lsh-portal.de)
 
-## 6. Auto-Update (optional, wie LSH)
+## 6. Automatische Updates
 
-Wenn du dasselbe GitHub-Pull-System wie LSH nutzen willst:
-
-```bash
-# In /etc/systemd/system/tankigeldi-update.timer
-[Unit]
-Description=TankiGeldi Update Timer
-
-[Timer]
-OnBootSec=2min
-OnUnitActiveSec=5min
-
-[Install]
-WantedBy=timers.target
-```
+Prüft alle 5 Minuten GitHub, holt neue Versionen und startet Tanki neu:
 
 ```bash
-# In /etc/systemd/system/tankigeldi-update.service  
-[Unit]
-Description=TankiGeldi Update
-
-[Service]
-Type=oneshot
-User=www-data
-WorkingDirectory=/var/www/tankigeldi
-ExecStart=/bin/bash -c 'git pull && npm install --production && systemctl restart tankigeldi'
+install -m 755 deploy/update.sh /usr/local/bin/tankigeldi-update
+install -m 644 deploy/tankigeldi-update.service deploy/tankigeldi-update.timer /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now tankigeldi-update.timer
 ```
 
-```bash
-sudo systemctl enable --now tankigeldi-update.timer
-```
+Letzte Updates ansehen: `journalctl -u tankigeldi-update -n 20`
 
 ## Logs prüfen
 
