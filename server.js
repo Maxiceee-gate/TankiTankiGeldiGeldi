@@ -17,7 +17,7 @@ const JOIN_WINDOW = 30 * 60;
 const STALE_AFTER = 15 * 60;
 const DEFAULT_CONSUMPTION = { benzin: 7.5, diesel: 6.0, lpg: 9.5, elektro: 18 };
 const FUEL_TYPES = Object.keys(DEFAULT_CONSUMPTION);
-const COLORS = ['#C8F03C', '#5CE1E6', '#FF8A5B', '#B69CFF', '#FFD25E', '#6EE7A8', '#FF6B9A', '#7AA7FF'];
+const COLORS = ['#005387', '#00757A', '#B8460E', '#5B4A8C', '#8A6300', '#007A4D', '#A3245E', '#3F5F8F'];
 
 // Real-world consumption (l/100 km) per car: city, rural (~80 km/h), motorway (~130 km/h)
 const slug = s => s.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
@@ -180,6 +180,12 @@ db.exec(`
     PRIMARY KEY (plan_id, user_id)
   );
 `);
+// Avatar colours moved from the old neon palette to the road-sign palette
+{
+  const OLD_COLORS = ['#C8F03C', '#5CE1E6', '#FF8A5B', '#B69CFF', '#FFD25E', '#6EE7A8', '#FF6B9A', '#7AA7FF'];
+  const swap = db.prepare('UPDATE users SET avatar_color = ? WHERE upper(avatar_color) = ?');
+  db.transaction(() => OLD_COLORS.forEach((c, i) => swap.run(COLORS[i], c)))();
+}
 ensureCols('users', {
   role: "TEXT DEFAULT 'passenger'", auto_start: 'INTEGER DEFAULT 1', car_name: 'TEXT',
   fuel_type: "TEXT DEFAULT 'benzin'", consumption: 'REAL', default_price: 'REAL', avatar_v: 'INTEGER',
@@ -200,7 +206,7 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_part_user ON ride_participants(user_id);
   -- the old version stored the driver as a participant; the driver is now implicit
   DELETE FROM ride_participants WHERE user_id = (SELECT driver_id FROM rides WHERE rides.id = ride_participants.ride_id);
-  UPDATE users SET avatar_color = '#C8F03C' WHERE avatar_color IS NULL OR avatar_color = '#C95B18';
+  UPDATE users SET avatar_color = '#005387' WHERE avatar_color IS NULL OR avatar_color = '#C95B18';
   UPDATE users SET avatar_v = unixepoch() WHERE avatar_data IS NOT NULL AND avatar_v IS NULL;
 `);
 

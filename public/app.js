@@ -12,7 +12,8 @@ const FUEL = {
   lpg: { label: 'Autogas (LPG)', unit: 'l', cons: 9.5 },
   elektro: { label: 'Elektro', unit: 'kWh', cons: 18 },
 };
-const COLORS = ['#C8F03C', '#5CE1E6', '#FF8A5B', '#B69CFF', '#FFD25E', '#6EE7A8', '#FF6B9A', '#7AA7FF'];
+const COLORS = ['#005387', '#00757A', '#B8460E', '#5B4A8C', '#8A6300', '#007A4D', '#A3245E', '#3F5F8F'];
+const cssVar = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
 const TILES = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
 // ── State ─────────────────────────────────────────────────────────────────────
@@ -566,8 +567,8 @@ function driveCard(r) {
   const people = inCarNow(r);
   const speed = S.pos && nowS() - S.pos.ts < 20 ? Math.round(S.pos.kmh) : 0;
   const per = c.total != null ? c.total / (people.length + 1) : null;
-  return `<div class="live-head">Live · seit ${timeStr(r.started_at)}</div>
-    <div class="live-title">Du fährst</div>
+  return `<div class="sign"><div class="live-head">Live seit ${timeStr(r.started_at)}</div>
+    <div class="live-title">Du fährst</div></div>
     <div class="stats">
       <div class="stat hi"><b>${kmNum(r.total_distance)}<small>km</small></b><span>Strecke</span></div>
       <div class="stat"><b>${durShort(nowS() - r.started_at)}<small>${nowS() - r.started_at >= 3600 ? 'h' : 'min'}</small></b><span>Dauer</span></div>
@@ -587,8 +588,8 @@ function passengerCard(r) {
   const mine = r.my_part;
   const share = mine ? c.shares[mine.id] : null;
   const others = inCarNow(r).filter(p => !isMe({ id: p.user_id }));
-  return `<div class="live-head">Live · ${esc(r.driver.username)} fährt</div>
-    <div class="live-title">Du fährst mit</div>
+  return `<div class="sign"><div class="live-head">Live · ${esc(r.driver.username)} fährt</div>
+    <div class="live-title">Du fährst mit</div></div>
     <div class="stats">
       <div class="stat hi"><b>${kmNum(r.total_distance - (mine?.from_km || 0))}<small>km</small></b><span>Deine Strecke</span></div>
       <div class="stat"><b>${durShort(nowS() - r.started_at)}<small>${nowS() - r.started_at >= 3600 ? 'h' : 'min'}</small></b><span>Dauer</span></div>
@@ -677,7 +678,7 @@ async function syncRouteLine() {
   if (!cur || !S.map) return;
   const d = await api('GET', `/api/rides/${cur.id}`);
   if (d.error || S.routeRide !== cur.id) return;
-  S.route = L.polyline(d.points, { color: '#C8F03C', weight: 5, opacity: .9 }).addTo(S.map);
+  S.route = L.polyline(d.points, { color: cssVar('--ac'), weight: 5, opacity: .9 }).addTo(S.map);
 }
 
 function updateChip() {
@@ -1200,7 +1201,7 @@ function drawChart() {
     cur.setAttribute('x1', x(p.km)); cur.setAttribute('x2', x(p.km));
     $('chart-read').innerHTML = `<b style="color:${speedColor(p.v)}">${p.v} km/h</b> · km ${kmNum(p.km)} · ${timeStr(p.t)}`;
     if (S.dmap) {
-      if (!S.dcur) S.dcur = L.circleMarker([p.lat, p.lng], { radius: 8, color: '#0B0C0A', weight: 3, fillColor: '#F3F5EF', fillOpacity: 1 });
+      if (!S.dcur) S.dcur = L.circleMarker([p.lat, p.lng], { radius: 8, color: cssVar('--tx'), weight: 3, fillColor: cssVar('--s1'), fillOpacity: 1 });
       S.dcur.setLatLng([p.lat, p.lng]).addTo(S.dlayer);
     }
   };
@@ -1256,12 +1257,12 @@ function drawDetailMap() {
     }
     flush();
     for (const e of an.events) {
-      L.circleMarker([e.lat, e.lng], { radius: 6, weight: 2, color: '#0B0C0A', fillColor: e.type === 'brake' ? '#FF6B57' : '#FFC24B', fillOpacity: 1 })
+      L.circleMarker([e.lat, e.lng], { radius: 6, weight: 2, color: cssVar('--s1'), fillColor: e.type === 'brake' ? cssVar('--red') : cssVar('--live'), fillOpacity: 1 })
         .bindTooltip(`${e.type === 'brake' ? 'Starke Bremsung' : 'Starke Beschleunigung'} · ${e.v} km/h`).addTo(S.dlayer);
     }
   }
   if (points.length) {
-    S.dline = L.polyline(points, { color: '#C8F03C', weight: 5, opacity: an ? 0 : .95, interactive: false }).addTo(S.dlayer);
+    S.dline = L.polyline(points, { color: cssVar('--ac'), weight: 5, opacity: an ? 0 : .95, interactive: false }).addTo(S.dlayer);
     L.marker(points[0], { icon: L.divIcon({ className: '', html: '<div class="pin-start"></div>', iconSize: [14, 14] }), interactive: false }).addTo(S.dlayer);
     if (ride.status === 'ended') {
       L.marker(points[points.length - 1], { icon: L.divIcon({ className: '', html: '<div class="pin-end"></div>', iconSize: [14, 14] }), interactive: false }).addTo(S.dlayer);
