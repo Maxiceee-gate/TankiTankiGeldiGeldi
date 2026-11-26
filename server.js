@@ -15,6 +15,7 @@ const DB_PATH = process.env.DB_PATH || path.join(__dirname, 'tankigeldi.db');
 const PUBLIC = path.join(__dirname, 'public');
 const JOIN_WINDOW = 30 * 60;
 const STALE_AFTER = 15 * 60;
+const PAUSE_MAX = 3 * 3600;
 const DEFAULT_CONSUMPTION = { benzin: 7.5, diesel: 6.0, lpg: 9.5, elektro: 18 };
 const FUEL_TYPES = Object.keys(DEFAULT_CONSUMPTION);
 const COLORS = ['#005387', '#00757A', '#B8460E', '#5B4A8C', '#8A6300', '#007A4D', '#A3245E', '#3F5F8F'];
@@ -40,11 +41,12 @@ function consAt(car, v) {
 function fuelProfile(ride) {
   const car = CAR_BY_ID.get(ride.car_id);
   if (!car) return null;
-  const pts = db.prepare('SELECT lat, lng, ts FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id);
+  const pts = db.prepare('SELECT lat, lng, ts, kind FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id);
   if (pts.length < 2) return null;
   const prof = [[0, 0]];
   let km = 0, liters = 0, chunkKm = 0, chunkT0 = pts[0].ts;
   for (let i = 1; i < pts.length; i++) {
+    if (pts[i].kind === 2) { chunkT0 = pts[i].ts; chunkKm = 0; continue; }
     chunkKm += haversine(pts[i - 1].lat, pts[i - 1].lng, pts[i].lat, pts[i].lng);
     if (chunkKm >= 0.5 || i === pts.length - 1) {
       const hours = Math.max(pts[i].ts - chunkT0, 1) / 3600;
@@ -67,6 +69,7 @@ function rideZones(ride, pts) {
   const zones = { stadt: { km: 0, s: 0, l: 0 }, land: { km: 0, s: 0, l: 0 }, autobahn: { km: 0, s: 0, l: 0 } };
   let chunkKm = 0, t0 = pts[0]?.[3];
   for (let i = 1; i < pts.length; i++) {
+    if (pts[i][4] === 2) { t0 = pts[i][3]; chunkKm = 0; continue; }
     chunkKm += haversine(pts[i - 1][0], pts[i - 1][1], pts[i][0], pts[i][1]);
     if (chunkKm >= 0.5 || i === pts.length - 1) {
       const secs = Math.max(pts[i][3] - t0, 1);
@@ -195,6 +198,8 @@ ensureCols('rides', {
   consumption: 'REAL', last_lat: 'REAL', last_lng: 'REAL', last_speed: 'REAL',
   last_ts: 'INTEGER', last_seen: 'INTEGER', auto_started: 'INTEGER DEFAULT 0', car_id: 'TEXT', name: 'TEXT', price_note: 'TEXT',
 });
+ensureCols('rides', { paused_at: 'INTEGER', seg_break: 'INTEGER DEFAULT 0', pause_total: 'INTEGER DEFAULT 0' });
+ensureCols('gps_points', { kind: 'INTEGER DEFAULT 0' });
 ensureCols('ride_participants', {
   from_km: 'REAL DEFAULT 0', to_km: 'REAL', share_eur: 'REAL', paid_at: 'INTEGER', paid_by: 'INTEGER',
 });
@@ -340,6 +345,7 @@ function rideCard(r, meId, parts = q.parts.all(r.id)) {
   const mine = parts.find(p => p.user_id === meId);
   return {
     id: r.id, name: r.name, status: r.status, started_at: r.started_at, ended_at: r.ended_at,
+    paused_at: r.paused_at, pause_total: r.pause_total || 0,
     total_distance: r.total_distance || 0, fuel_type: r.fuel_type, fuel_price: r.fuel_price,
     consumption: r.consumption, auto_started: !!r.auto_started, car: carLabel(CAR_BY_ID.get(r.car_id)) || null, price_note: r.price_note,
     last_lat: r.last_lat, last_lng: r.last_lng, last_speed: r.last_speed, last_seen: r.last_seen,
@@ -390,36 +396,98 @@ function settle(rideId) {
   })();
 }
 
-const insPoint = db.prepare('INSERT INTO gps_points (ride_id, lat, lng, speed, ts) VALUES (?, ?, ?, ?, ?)');
+const insPoint = db.prepare('INSERT INTO gps_points (ride_id, lat, lng, speed, ts, kind) VALUES (?, ?, ?, ?, ?, ?)');
 const updRidePos = db.prepare(`
-  UPDATE rides SET total_distance = ?, last_lat = ?, last_lng = ?, last_speed = ?, last_ts = ?, last_seen = ?
+  UPDATE rides SET total_distance = ?, last_lat = ?, last_lng = ?, last_speed = ?, last_ts = ?, last_seen = ?, seg_break = ?
   WHERE id = ?`);
 
-function addPoints(ride, pts) {
+// kind: 0 measured · 1 estimated (gap filled along the road) · 2 first point after a pause (no line to the previous one)
+function addPoints(ride, pts, filler = []) {
+  if (ride.paused_at) return ride;
   const t = now();
   let { last_lat: lat0, last_lng: lng0, last_ts: t0, last_speed: spd } = ride;
   let dist = ride.total_distance || 0;
+  let segBreak = !!ride.seg_break;
   const clean = (Array.isArray(pts) ? pts : [])
-    .map(p => ({ lat: +p.lat, lng: +p.lng, speed: Math.max(0, +p.speed || 0), ts: Math.round(+p.ts) }))
+    .map(p => ({ lat: +p.lat, lng: +p.lng, speed: Math.max(0, +p.speed || 0), ts: Math.round(+p.ts * 10) / 10, kind: 0 }))
     .filter(p => Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180 && p.ts > t - 6 * 3600 && p.ts <= t + 60)
     .sort((a, b) => a.ts - b.ts)
     .slice(-3000);
   db.transaction(() => {
-    for (const p of clean) {
+    for (const p of [...filler, ...clean]) {
       if (t0 && p.ts <= t0) continue;
+      let kind = p.kind;
       if (lat0 != null) {
         const d = haversine(lat0, lng0, p.lat, p.lng);
-        if (d / Math.max(p.ts - t0, 1) * 3600 > 250) continue; // GPS jump
-        if (d < 0.01) { spd = p.speed; continue; }               // jitter while standing
-        dist += d;
+        if (kind === 0 && segBreak) { kind = 2; segBreak = false; }
+        else if (kind === 0) {
+          if (d / Math.max(p.ts - t0, 0.5) * 3600 > 250) continue;  // GPS jump
+          if (d < 0.003 && p.speed < 4) { spd = p.speed; continue; }  // jitter while standing
+        }
+        if (kind !== 2) dist += d;
       }
-      insPoint.run(ride.id, p.lat, p.lng, p.speed, p.ts);
+      insPoint.run(ride.id, p.lat, p.lng, p.speed, p.ts, kind);
       lat0 = p.lat; lng0 = p.lng; t0 = p.ts; spd = p.speed;
     }
-    updRidePos.run(Math.round(dist * 1000) / 1000, lat0, lng0, spd, t0, t, ride.id);
+    updRidePos.run(Math.round(dist * 1000) / 1000, lat0, lng0, spd, t0, t, segBreak ? 1 : 0, ride.id);
   })();
-  Object.assign(ride, { total_distance: dist, last_lat: lat0, last_lng: lng0, last_speed: spd, last_ts: t0, last_seen: t });
+  Object.assign(ride, { total_distance: dist, last_lat: lat0, last_lng: lng0, last_speed: spd, last_ts: t0, last_seen: t, seg_break: segBreak ? 1 : 0 });
   return ride;
+}
+
+// When the phone sent nothing for a while (app in background, screen off), estimate the missing stretch along the road
+async function gapFill(ride, pts) {
+  if (ride.last_ts == null || ride.paused_at || ride.seg_break) return [];
+  const first = (Array.isArray(pts) ? pts : [])
+    .map(p => ({ lat: +p.lat, lng: +p.lng, ts: Math.round(+p.ts * 10) / 10 }))
+    .filter(p => Math.abs(p.lat) <= 90 && Math.abs(p.lng) <= 180 && p.ts > ride.last_ts && p.ts <= now() + 60)
+    .sort((a, b) => a.ts - b.ts)[0];
+  if (!first) return [];
+  const gap = first.ts - ride.last_ts;
+  const direct = haversine(ride.last_lat, ride.last_lng, first.lat, first.lng);
+  if (gap < 20 || direct < 0.15 || gap > 3 * 3600 || direct / (gap / 3600) > 220) return [];
+  let line = [[ride.last_lng, ride.last_lat], [first.lng, first.lat]];
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 4000);
+    const r = await fetch(`https://router.project-osrm.org/route/v1/driving/${ride.last_lng},${ride.last_lat};${first.lng},${first.lat}?overview=full&geometries=geojson`,
+      { signal: ctl.signal, headers: { 'User-Agent': 'TankiTankiGeldiGeldi/1.0 (private friends app)' } });
+    clearTimeout(timer);
+    const j = await r.json();
+    const c = j.routes?.[0]?.geometry?.coordinates;
+    if (j.code === 'Ok' && c?.length >= 2 && j.routes[0].distance / 1000 < direct * 2.5 + 1) line = c;
+  } catch { /* routing unavailable: straight line */ }
+  const cum = [0];
+  for (let i = 1; i < line.length; i++) cum.push(cum[i - 1] + haversine(line[i - 1][1], line[i - 1][0], line[i][1], line[i][0]));
+  const total = cum[cum.length - 1];
+  const n = Math.min(Math.max(Math.round(gap / 5), 2), 240);
+  const kmh = Math.round(total / (gap / 3600) * 10) / 10;
+  const out = [];
+  for (let k = 1; k < n; k++) {
+    const target = total * k / n;
+    let i = 1;
+    while (i < cum.length - 1 && cum[i] < target) i++;
+    const f = (target - cum[i - 1]) / ((cum[i] - cum[i - 1]) || 1);
+    out.push({
+      lat: line[i - 1][1] + (line[i][1] - line[i - 1][1]) * f, lng: line[i - 1][0] + (line[i][0] - line[i - 1][0]) * f,
+      speed: kmh, ts: Math.round((ride.last_ts + gap * k / n) * 10) / 10, kind: 1,
+    });
+  }
+  return out;
+}
+
+// One batch per ride at a time, so a slow routing call cannot overlap with the next batch
+const chains = new Map();
+function ingest(rideId, pts) {
+  const run = async () => {
+    const ride = q.ride.get(rideId);
+    if (!ride || ride.status !== 'active') return ride;
+    return addPoints(ride, pts, await gapFill(ride, pts));
+  };
+  const next = (chains.get(rideId) || Promise.resolve()).then(run, run);
+  chains.set(rideId, next);
+  next.finally(() => { if (chains.get(rideId) === next) chains.delete(rideId); }).catch(() => {});
+  return next;
 }
 
 // ── Realtime ──────────────────────────────────────────────────────────────────
@@ -442,7 +510,9 @@ function broadcastPos(r) {
 }
 
 function endRide(ride, at = now()) {
-  db.prepare("UPDATE rides SET status = 'ended', ended_at = ? WHERE id = ?").run(at, ride.id);
+  const open = q.ride.get(ride.id)?.paused_at;
+  db.prepare("UPDATE rides SET status = 'ended', ended_at = ?, pause_total = COALESCE(pause_total, 0) + ?, paused_at = NULL WHERE id = ?")
+    .run(at, open ? Math.max(0, at - open) : 0, ride.id);
   settle(ride.id);
   const driver = q.userById.get(ride.driver_id), done = q.ride.get(ride.id);
   if (driver.fuel_l != null && done.total_distance > 0) {
@@ -463,11 +533,13 @@ function deleteRide(ride) {
 
 // Rides whose driver's phone went silent are closed automatically; tiny false starts are dropped.
 setInterval(() => {
-  const stale = db.prepare("SELECT * FROM rides WHERE status = 'active' AND COALESCE(last_seen, started_at) < ?").all(now() - STALE_AFTER);
+  const stale = db.prepare(`SELECT * FROM rides WHERE status = 'active' AND (
+    (paused_at IS NULL AND COALESCE(last_seen, started_at) < ?) OR (paused_at IS NOT NULL AND paused_at < ?))`)
+    .all(now() - STALE_AFTER, now() - PAUSE_MAX);
   for (const r of stale) {
     const hasParts = q.parts.all(r.id).length > 0;
     if ((r.total_distance || 0) < 0.3 && !hasParts) deleteRide(r);
-    else endRide(r, r.last_ts || r.started_at);
+    else endRide(r, r.paused_at || r.last_ts || r.started_at);
   }
 }, 60 * 1000);
 
@@ -604,13 +676,16 @@ route('GET', '/api/rides/:id', true, ({ user, params }) => {
   const calc = shareCalc(ride, parts);
   const mine = parts.find(p => p.user_id === user.id);
   const pay = mine ? payInfo(q.userById.get(ride.driver_id)) : null;
-  const points = db.prepare('SELECT lat, lng FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id).map(p => [p.lat, p.lng]);
+  const rows = db.prepare('SELECT lat, lng, speed, ts, kind FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id);
+  const points = rows.map(p => [p.lat, p.lng]);
+  const segments = [];
+  for (const p of rows) { if (p.kind === 2 || !segments.length) segments.push([]); segments[segments.length - 1].push([p.lat, p.lng]); }
   const card = rideCard(ride, user.id, parts);
-  const track = db.prepare('SELECT lat, lng, speed, ts FROM gps_points WHERE ride_id = ? ORDER BY ts').all(ride.id).map(p => [p.lat, p.lng, p.speed, p.ts]);
+  const track = rows.map(p => [p.lat, p.lng, p.speed, p.ts, p.kind]);
   const zones = track.length > 1 ? rideZones(ride, track) : null;
   card.participants.forEach(p => { p.live_share = calc.shares[p.id]; });
   return {
-    ride: card, points, joinable: ride.status === 'active' || ride.ended_at > now() - JOIN_WINDOW,
+    ride: card, points, segments, joinable: ride.status === 'active' || ride.ended_at > now() - JOIN_WINDOW,
     calc: { perKm: calc.perKm, totalCost: calc.totalCost, driverShare: calc.driverShare, effConsumption: calc.effConsumption }, pay, track, zones,
   };
 });
@@ -648,19 +723,36 @@ route('POST', '/api/rides', true, ({ user, body }) => {
   return { ride: rideCard(ride, user.id) };
 });
 
-route('POST', '/api/rides/:id/points', true, ({ user, params, body }) => {
+route('POST', '/api/rides/:id/points', true, async ({ user, params, body }) => {
   const ride = driverRide(params.id, user.id);
   if (ride.status !== 'active') fail(409, 'Fahrt ist schon beendet.');
-  addPoints(ride, body.points);
-  broadcastPos(ride);
-  return { total_distance: ride.total_distance };
+  const r = await ingest(ride.id, body.points);
+  broadcastPos(r);
+  return { total_distance: r.total_distance };
 });
 
-route('POST', '/api/rides/:id/end', true, ({ user, params, body }) => {
+route('POST', '/api/rides/:id/pause', true, ({ user, params }) => {
   const ride = driverRide(params.id, user.id);
   if (ride.status !== 'active') fail(409, 'Fahrt ist schon beendet.');
-  if (body.points) addPoints(ride, body.points);
-  endRide(ride);
+  if (!ride.paused_at) db.prepare('UPDATE rides SET paused_at = ? WHERE id = ?').run(now(), ride.id);
+  send(audience(ride), { type: 'ride_updated', rideId: ride.id }, user.id);
+});
+
+route('POST', '/api/rides/:id/resume', true, ({ user, params }) => {
+  const ride = driverRide(params.id, user.id);
+  if (ride.status !== 'active') fail(409, 'Fahrt ist schon beendet.');
+  if (ride.paused_at) {
+    db.prepare('UPDATE rides SET pause_total = COALESCE(pause_total, 0) + ?, paused_at = NULL, seg_break = 1, last_seen = ? WHERE id = ?')
+      .run(now() - ride.paused_at, now(), ride.id);
+  }
+  send(audience(ride), { type: 'ride_updated', rideId: ride.id }, user.id);
+});
+
+route('POST', '/api/rides/:id/end', true, async ({ user, params, body }) => {
+  const ride = driverRide(params.id, user.id);
+  if (ride.status !== 'active') fail(409, 'Fahrt ist schon beendet.');
+  if (body.points) await ingest(ride.id, body.points);
+  endRide(q.ride.get(ride.id));
   return { ok: true };
 });
 
@@ -866,14 +958,14 @@ route('GET', '/api/users/:id/stats', true, ({ user, params }) => {
   const one = (sql, ...a) => db.prepare(sql).get(...a);
 
   const driven = one(`
-    SELECT COUNT(*) AS n, COALESCE(SUM(total_distance), 0) AS km, COALESCE(SUM(ended_at - started_at), 0) AS secs,
+    SELECT COUNT(*) AS n, COALESCE(SUM(total_distance), 0) AS km, COALESCE(SUM(ended_at - started_at - COALESCE(pause_total, 0)), 0) AS secs,
       COALESCE(MAX(total_distance), 0) AS longest,
       COALESCE(SUM(CASE WHEN fuel_price IS NOT NULL THEN total_distance * consumption / 100 * fuel_price END), 0) AS fuel_eur,
       COALESCE(SUM(total_distance * consumption / 100), 0) AS liters
     FROM rides WHERE driver_id = ? AND status = 'ended'`, u.id);
   const ridden = one(`
     SELECT COUNT(*) AS n, COALESCE(SUM(COALESCE(p.to_km, r.total_distance) - COALESCE(p.from_km, 0)), 0) AS km,
-      COALESCE(SUM(r.ended_at - r.started_at), 0) AS secs, COALESCE(SUM(p.share_eur), 0) AS paid_eur,
+      COALESCE(SUM(r.ended_at - r.started_at - COALESCE(r.pause_total, 0)), 0) AS secs, COALESCE(SUM(p.share_eur), 0) AS paid_eur,
       COALESCE(MAX(COALESCE(p.to_km, r.total_distance) - COALESCE(p.from_km, 0)), 0) AS longest
     FROM ride_participants p JOIN rides r ON r.id = p.ride_id WHERE p.user_id = ? AND r.status = 'ended'`, u.id);
   const carried = one(`
@@ -881,7 +973,7 @@ route('GET', '/api/users/:id/stats', true, ({ user, params }) => {
     FROM ride_participants p JOIN rides r ON r.id = p.ride_id WHERE r.driver_id = ? AND r.status = 'ended'`, u.id);
   const topSpeed = one(`
     SELECT COALESCE(MAX(g.speed), 0) AS v FROM gps_points g JOIN rides r ON r.id = g.ride_id
-    WHERE r.status = 'ended' AND g.speed < 260 AND (r.driver_id = ? OR r.id IN (SELECT ride_id FROM ride_participants WHERE user_id = ? AND COALESCE(from_km, 0) = 0 AND to_km IS NULL))`, u.id, u.id).v;
+    WHERE r.status = 'ended' AND g.speed < 260 AND g.kind != 1 AND (r.driver_id = ? OR r.id IN (SELECT ride_id FROM ride_participants WHERE user_id = ? AND COALESCE(from_km, 0) = 0 AND to_km IS NULL))`, u.id, u.id).v;
 
   const involved = `SELECT id, started_at FROM rides WHERE status = 'ended' AND (driver_id = @u OR id IN (SELECT ride_id FROM ride_participants WHERE user_id = @u))`;
   const days = db.prepare(`SELECT strftime('%w', started_at, 'unixepoch', 'localtime') AS d, COUNT(*) AS c FROM (${involved}) GROUP BY d ORDER BY c DESC`).all({ u: u.id });
@@ -924,7 +1016,7 @@ route('GET', '/api/users/:id/stats', true, ({ user, params }) => {
     const parts = q.parts.all(r.id);
     const p = parts.find(x => x.user_id === u.id);
     return {
-      id: r.id, name: r.name, started_at: r.started_at, ended_at: r.ended_at, driver: pub(q.userById.get(r.driver_id)),
+      id: r.id, name: r.name, started_at: r.started_at, ended_at: r.ended_at, pause_total: r.pause_total || 0, driver: pub(q.userById.get(r.driver_id)),
       km: p ? (p.to_km ?? r.total_distance) - (p.from_km || 0) : r.total_distance, people: parts.length + 1,
     };
   });
@@ -1208,7 +1300,7 @@ wss.on('connection', ws => {
   let user = null;
   ws.isAlive = true;
   ws.on('pong', () => { ws.isAlive = true; });
-  ws.on('message', raw => {
+  ws.on('message', async raw => {
     let m;
     try { m = JSON.parse(raw); } catch { return; }
     if (m.type === 'auth') {
@@ -1222,9 +1314,9 @@ wss.on('connection', ws => {
     const ride = q.ride.get(+m.rideId);
     if (!ride || ride.driver_id !== user.id || ride.status !== 'active') return;
     try {
-      addPoints(ride, m.points);
-      broadcastPos(ride);
-      ws.send(JSON.stringify({ type: 'ack', seq: m.seq, dist: ride.total_distance }));
+      const r = await ingest(ride.id, m.points);
+      broadcastPos(r);
+      ws.send(JSON.stringify({ type: 'ack', seq: m.seq, dist: r.total_distance }));
     } catch (e) { console.error(e); }
   });
   ws.on('close', () => {

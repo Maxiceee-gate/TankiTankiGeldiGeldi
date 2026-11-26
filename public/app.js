@@ -200,6 +200,8 @@ function boot() {
   window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); S.installEvt = e; if (S.tab === 'home') renderHome(); });
   document.addEventListener('visibilitychange', onVisible);
   setInterval(tick, 5000);
+  setInterval(flush, 2000);
+  document.addEventListener('pointerdown', unlockAudio, { once: true, capture: true });
   setupSheetSwipe();
   S.homeDrag = makeDraggable($('home-sheet'), () => [150, Math.round(vh() * 0.62), vh() - 76 - safeTop()],
     () => { if (S.follow && S.pos) centerOn(S.pos.lat, S.pos.lng); });
@@ -210,7 +212,22 @@ function boot() {
   },
     () => fitDetail());
   setInterval(() => { if (!document.hidden && S.me) loadFeed(); }, 20000);
-  if (S.token) start(); else showAuth();
+  if (S.token) { bootFromCache(); start(); } else showAuth();
+}
+
+// Show the last known state immediately (the app is often cold-started when you come back from another app)
+function bootFromCache() {
+  try {
+    const c = JSON.parse(lsGet('cache') || 'null');
+    if (!c?.me || !c.feed || Date.now() - c.t > 24 * 3600e3) return;
+    S.me = c.me;
+    S.feed = c.feed;
+    $('auth').hidden = true;
+    $('tabbar').hidden = false;
+    initMap();
+    showTab('home');
+    renderTopAvatar();
+  } catch { /* corrupt cache */ }
 }
 
 function showAuth() {
@@ -404,7 +421,9 @@ async function logout(expired = false) {
   S.me = null;
   lsSet('tk', null);
   lsSet('outbox', null);
+  lsSet('cache', null);
   S.outbox = [];
+  keepAlive(false);
   S.ws?.close();
   if (S.watch != null) { navigator.geolocation.clearWatch(S.watch); S.watch = null; }
   keepAwake(false);
@@ -425,6 +444,7 @@ function showTab(tab) {
 
 function onVisible() {
   if (document.hidden || !S.me) return;
+  if (amDriving()) { keepAwake(true); S.routeStale = true; flush(); }
   if (S.gps !== 'ok' || !S.pos || nowS() - S.pos.ts > 60) startGPS(true);
   connectWS();
   loadFeed();
@@ -451,7 +471,7 @@ function tick() {
   checkGpsAlive();
   flush();
   const cur = currentRide();
-  if (cur && isMe(cur.driver)) checkStop();
+  if (cur && isMe(cur.driver) && !cur.paused_at) checkStop();
   if (cur && S.tab === 'home' && $('sheet-bg').hidden) renderHome();
 }
 
@@ -463,8 +483,11 @@ async function loadFeed() {
   const r = await api('GET', '/api/feed');
   if (r.error) return;
   S.feed = r;
+  lsSet('cache', JSON.stringify({ me: S.me, feed: r, t: Date.now() }));
   const cur = currentRide();
-  keepAwake(!!(cur && isMe(cur.driver)));
+  const driving = !!(cur && isMe(cur.driver));
+  keepAwake(driving);
+  keepAlive(driving, cur?.paused_at);
   if (!cur || !isMe(cur.driver)) { S.outbox = []; saveOutbox(); }
   syncRouteLine();
   updatePins();
@@ -562,16 +585,19 @@ function idleCard() {
     <button class="btn ghost" data-act="plan-new">Fahrt planen & Freunde fragen</button>`;
 }
 
+const rideSecs = r => (r.ended_at || r.paused_at || nowS()) - r.started_at - (r.pause_total || 0);
+
 function driveCard(r) {
   const c = liveCalc(r);
   const people = inCarNow(r);
   const speed = S.pos && nowS() - S.pos.ts < 20 ? Math.round(S.pos.kmh) : 0;
   const per = c.total != null ? c.total / (people.length + 1) : null;
-  return `<div class="sign"><div class="live-head">Live seit ${timeStr(r.started_at)}</div>
-    <div class="live-title">Du fährst</div></div>
+  const paused = !!r.paused_at;
+  return `<div class="sign${paused ? ' paused' : ''}"><div class="live-head">${paused ? `Pausiert seit ${timeStr(r.paused_at)}` : `Live seit ${timeStr(r.started_at)}`}</div>
+    <div class="live-title">${paused ? 'Pause' : 'Du fährst'}</div></div>
     <div class="stats">
       <div class="stat hi"><b>${kmNum(r.total_distance)}<small>km</small></b><span>Strecke</span></div>
-      <div class="stat"><b>${durShort(nowS() - r.started_at)}<small>${nowS() - r.started_at >= 3600 ? 'h' : 'min'}</small></b><span>Dauer</span></div>
+      <div class="stat"><b>${durShort(rideSecs(r))}<small>${rideSecs(r) >= 3600 ? 'h' : 'min'}</small></b><span>Dauer</span></div>
       <div class="stat"><b>${speed}<small>km/h</small></b><span>Tempo</span></div>
     </div>
     <div class="people">
@@ -579,8 +605,12 @@ function driveCard(r) {
       <div class="grow">${people.length ? `${people.length} Mitfahrer · ${per != null ? `je ~${eur(per)}` : 'Preis fehlt'}` : 'Noch keine Mitfahrer'}</div>
       <button class="pill ghost" data-act="add-part" data-id="${r.id}">+ Mitfahrer</button>
     </div>
-    <button class="btn" data-act="end" data-id="${r.id}">Fahrt beenden</button>
-    <button class="link" data-act="discard" data-id="${r.id}">Fehlstart? Fahrt verwerfen</button>`;
+    ${paused
+      ? `<button class="btn" data-act="resume" data-id="${r.id}">Weiter fahren</button><div style="height:10px"></div><button class="btn ghost" data-act="end" data-id="${r.id}">Fahrt beenden</button>
+         <p class="note">Während der Pause wird nichts gemessen. Sobald du wieder losfährst, geht es von selbst weiter.</p>`
+      : `<div class="btn-row"><button class="btn ghost" data-act="pause" data-id="${r.id}">Pause</button><button class="btn" data-act="end" data-id="${r.id}">Fahrt beenden</button></div>`}
+    <button class="link" data-act="discard" data-id="${r.id}">Fehlstart? Fahrt verwerfen</button>
+    ${lsGet('bgHintHidden') ? '' : `<div class="hint"><span class="grow">Damit nichts fehlt: Tanki geöffnet lassen. Mit Google Maps am besten im Split-Screen (Android). Lücken füllt die App entlang der Straße auf.</span><button class="x-btn" data-act="hint-hide" aria-label="Hinweis ausblenden">${ICON.x}</button></div>`}`;
 }
 
 function passengerCard(r) {
@@ -592,7 +622,7 @@ function passengerCard(r) {
     <div class="live-title">Du fährst mit</div></div>
     <div class="stats">
       <div class="stat hi"><b>${kmNum(r.total_distance - (mine?.from_km || 0))}<small>km</small></b><span>Deine Strecke</span></div>
-      <div class="stat"><b>${durShort(nowS() - r.started_at)}<small>${nowS() - r.started_at >= 3600 ? 'h' : 'min'}</small></b><span>Dauer</span></div>
+      <div class="stat"><b>${durShort(rideSecs(r))}<small>${rideSecs(r) >= 3600 ? 'h' : 'min'}</small></b><span>Dauer</span></div>
       <div class="stat"><b>${share != null ? dec(share, 2) : '–'}<small>€</small></b><span>Dein Anteil</span></div>
     </div>
     <div class="people">${av(r.driver, 28)}${others.length ? avStack(others) : ''}<div class="grow">${esc(r.driver.username)}${others.length ? ` + ${others.length}` : ''}</div>
@@ -605,7 +635,7 @@ function rideRow(r) {
   const near = r.status === 'active' && S.pos && r.last_lat != null && meters(S.pos, { lat: r.last_lat, lng: r.last_lng }) < NEAR_M;
   let sub, btn;
   if (r.status === 'active') {
-    sub = `seit ${dur(S.feed.now - r.started_at)} · ${kmNum(r.total_distance)} km${n ? ` · ${n} Mitfahrer` : ''}`;
+    sub = r.paused_at ? `pausiert · ${kmNum(r.total_distance)} km${n ? ` · ${n} Mitfahrer` : ''}` : `seit ${dur(S.feed.now - r.started_at - (r.pause_total || 0))} · ${kmNum(r.total_distance)} km${n ? ` · ${n} Mitfahrer` : ''}`;
     btn = r.joined ? '<span class="pill done">Dabei</span>' : `<button class="pill" data-act="join" data-id="${r.id}">Mitfahren</button>`;
   } else {
     const left = Math.max(0, Math.ceil((r.ended_at + JOIN_WINDOW - S.feed.now) / 60));
@@ -678,7 +708,7 @@ async function syncRouteLine() {
   if (!cur || !S.map) return;
   const d = await api('GET', `/api/rides/${cur.id}`);
   if (d.error || S.routeRide !== cur.id) return;
-  S.route = L.polyline(d.points, { color: cssVar('--ac'), weight: 5, opacity: .9 }).addTo(S.map);
+  S.route = L.polyline(d.segments || d.points, { color: cssVar('--ac'), weight: 5, opacity: .9 }).addTo(S.map);
 }
 
 function updateChip() {
@@ -734,14 +764,20 @@ function onPos(p) {
   moveMe();
   if (c.accuracy > 80) return;
 
-  const pt = { lat: here.lat, lng: here.lng, speed: Math.round(S.pos.kmh * 10) / 10, ts: Math.round(ts) };
+  const pt = { lat: here.lat, lng: here.lng, speed: Math.round(S.pos.kmh * 10) / 10, ts: Math.round(ts * 10) / 10 };
   S.buf.push(pt);
   while (S.buf.length && S.buf[0].ts < ts - 600) S.buf.shift();
 
   const cur = currentRide();
   if (cur && isMe(cur.driver)) {
+    if (cur.paused_at) {
+      // Driving off again after a break resumes the ride by itself
+      S.fastCount = S.pos.kmh >= 15 ? (S.fastCount || 0) + 1 : 0;
+      if (S.fastCount >= 6) { S.fastCount = 0; resumeRide(cur.id, true); }
+      return;
+    }
     S.outbox.push(pt);
-    saveOutbox();
+    if (Date.now() - (S.outboxSaved || 0) > 3000) { S.outboxSaved = Date.now(); saveOutbox(); }
     S.route?.addLatLng([pt.lat, pt.lng]);
   } else if (!cur) {
     detect();
@@ -861,6 +897,8 @@ function ack(seq, dist) {
   saveOutbox();
   const cur = currentRide();
   if (cur && dist != null) cur.total_distance = dist;
+  // After the app was in the background the server has filled the gap along the road: redraw the live line
+  if (S.routeStale && cur) { S.routeStale = false; S.routeRide = null; syncRouteLine(); }
 }
 
 // ── Realtime ──────────────────────────────────────────────────────────────────
@@ -906,6 +944,42 @@ async function notify(title, body) {
   } catch { /* notifications unsupported */ }
 }
 
+function silentWav() {
+  const rate = 8000, n = rate, buf = new Uint8Array(44 + n), dv = new DataView(buf.buffer);
+  const w = (o, str) => [...str].forEach((c, i) => { buf[o + i] = c.charCodeAt(0); });
+  w(0, 'RIFF'); dv.setUint32(4, 36 + n, true); w(8, 'WAVEfmt '); dv.setUint32(16, 16, true); dv.setUint16(20, 1, true); dv.setUint16(22, 1, true);
+  dv.setUint32(24, rate, true); dv.setUint32(28, rate, true); dv.setUint16(32, 1, true); dv.setUint16(34, 8, true); w(36, 'data'); dv.setUint32(40, n, true);
+  buf.fill(128, 44);
+  return URL.createObjectURL(new Blob([buf], { type: 'audio/wav' }));
+}
+
+function audioEl() {
+  if (S.audio) return S.audio;
+  const a = S.audio = new Audio(silentWav());
+  a.loop = true;
+  a.setAttribute('playsinline', '');
+  // Another app's audio (navigation voice) can pause us: try to continue
+  a.addEventListener('pause', () => { if (S.alive) setTimeout(() => { if (S.alive && a.paused) a.play().catch(() => {}); }, 1500); });
+  return a;
+}
+
+// The first tap anywhere lets the browser play audio later without another tap (auto-started rides)
+function unlockAudio() {
+  const a = audioEl();
+  a.play().then(() => { if (!S.alive) a.pause(); }).catch(() => {});
+}
+
+function keepAlive(on, paused = false) {
+  S.alive = on;
+  if ('mediaSession' in navigator) {
+    try {
+      navigator.mediaSession.metadata = on ? new MediaMetadata({ title: paused ? 'Fahrt pausiert' : 'Fahrt läuft', artist: 'TankiTankiGeldiGeldi', artwork: [{ src: '/icon-512.png', sizes: '512x512', type: 'image/png' }] }) : null;
+    } catch { /* unsupported */ }
+  }
+  if (on) audioEl().play().catch(() => {});
+  else if (S.audio) S.audio.pause();
+}
+
 async function keepAwake(on) {
   if (!('wakeLock' in navigator)) return;
   if (on && !S.wake && !document.hidden) {
@@ -944,6 +1018,31 @@ async function endRide(id, auto = false) {
   toast(auto ? 'Fahrt automatisch beendet' : 'Fahrt beendet – prüfe kurz Preis und Mitfahrer');
   if (auto) notify('Fahrt beendet', 'Prüfe kurz Spritpreis und Mitfahrer.');
   openDetail(id);
+}
+
+async function pauseRide(id) {
+  if (S.outbox.length) {
+    const pts = S.outbox.slice();
+    const sent = await api('POST', `/api/rides/${id}/points`, { points: pts });
+    if (!sent.error) S.outbox.splice(0, pts.length);
+  }
+  const r = await call('POST', `/api/rides/${id}/pause`);
+  if (r.error) return;
+  S.outbox = [];
+  S.inflight = null;
+  S.fastCount = 0;
+  saveOutbox();
+  await loadFeed();
+  toast('Fahrt pausiert – es wird nichts aufgezeichnet');
+}
+
+async function resumeRide(id, auto = false) {
+  const r = await call('POST', `/api/rides/${id}/resume`);
+  if (r.error) return;
+  S.stillSince = null;
+  S.fastCount = 0;
+  await loadFeed();
+  toast(auto ? 'Du fährst wieder – die Aufzeichnung läuft' : 'Weiter geht’s – die Aufzeichnung läuft');
 }
 
 async function discardRide(id) {
@@ -1108,28 +1207,33 @@ function analyze(track) {
   const smp = [];
   let km = 0;
   for (let i = 0; i < track.length; i++) {
-    const [lat, lng, sp, ts] = track[i];
+    const [lat, lng, sp, ts, kind = 0] = track[i];
     let v = sp;
     if (i > 0) {
       const [pl, pg, , pt] = track[i - 1];
       const d = meters({ lat: pl, lng: pg }, { lat, lng }) / 1000;
-      km += d;
-      if (!(sp > 0)) v = ts > pt ? d / ((ts - pt) / 3600) : 0;
+      if (kind !== 2) km += d;
+      if (!(sp > 0) && kind === 0) v = ts > pt ? d / ((ts - pt) / 3600) : 0;
     }
-    smp.push({ lat, lng, km, t: ts, v: Math.min(v || 0, 250) });
+    smp.push({ lat, lng, km, t: ts, v: Math.min(v || 0, 250), kind });
   }
-  for (let i = 1; i < smp.length - 1; i++) smp[i].vs = (smp[i - 1].v + smp[i].v + smp[i + 1].v) / 3;
+  for (let i = 1; i < smp.length - 1; i++) {
+    if (smp[i - 1].kind === 0 && smp[i].kind === 0 && smp[i + 1].kind === 0) smp[i].vs = (smp[i - 1].v + smp[i].v + smp[i + 1].v) / 3;
+  }
   smp.forEach(p => { p.v = Math.round(p.vs ?? p.v); delete p.vs; });
 
-  let standing = 0, moving = 0, movingKm = 0, max = 0, lastB = -1e9, lastA = -1e9;
+  let standing = 0, moving = 0, movingKm = 0, max = 0, lastB = -1e9, lastA = -1e9, estKm = 0, gapSum = 0, gapN = 0;
   const events = [];
   for (let i = 1; i < smp.length; i++) {
     const a = smp[i - 1], b = smp[i], dt = b.t - a.t;
-    if (dt <= 0) continue;
-    // Standing still stores no points, so a stop shows up as a time gap between two points
+    if (dt <= 0 || b.kind === 2) continue;           // a pause is neither standing nor driving
+    const est = a.kind === 1 || b.kind === 1;
+    // Standing still stores almost no points, so a stop shows up as a time gap between two points
     const segKm = b.km - a.km, segV = segKm / (dt / 3600);
     const driveSecs = segV < 3 ? 0 : Math.min(dt, segKm / (Math.max((a.v + b.v) / 2, 5) / 3600));
     standing += dt - driveSecs; moving += driveSecs; movingKm += driveSecs ? segKm : 0;
+    if (est) { estKm += segKm; continue; }
+    if (dt <= 10) { gapSum += dt; gapN++; }
     max = Math.max(max, b.v);
     if (dt > 8) continue;
     const acc = (b.v - a.v) / 3.6 / dt;
@@ -1141,7 +1245,10 @@ function analyze(track) {
   const accels = events.length - brakes;
   const per10 = Math.max(total / 10, 0.5);
   const score = Math.round(Math.max(0, Math.min(100, 100 - (brakes * 8 + accels * 5) / per10 - Math.max(0, max - 160) * 0.3)));
-  return { smp, total, max, standing, moving, avgMoving: moving > 0 ? movingKm / (moving / 3600) : 0, events, brakes, accels, score };
+  return {
+    smp, total, max, standing, moving, avgMoving: moving > 0 ? movingKm / (moving / 3600) : 0, events, brakes, accels, score,
+    measured: smp.filter(p => p.kind !== 1).length, interval: gapN ? gapSum / gapN : null, estKm,
+  };
 }
 
 function styleLabel(score) {
@@ -1156,6 +1263,7 @@ function statsHtml(an, zones) {
     <div class="chart-read" id="chart-read">Finger über den Graph ziehen</div>
     <div class="chart" id="chart"></div>
     <div class="legend"><span>0</span><i></i><span>160+ km/h</span></div>
+    <p class="note">${an.measured} Messpunkte${an.interval ? `, im Schnitt alle ${dec(an.interval, 1)} s` : ''}${an.estKm > 0.05 ? ` · ${dec(an.estKm, 1)} km geschätzt (gestrichelt – die App war im Hintergrund)` : ''}</p>
     <div class="stats" style="margin-top:12px">
       <div class="stat"><b>${Math.round(an.max)}<small>km/h</small></b><span>Max</span></div>
       <div class="stat"><b>${Math.round(an.avgMoving)}<small>km/h</small></b><span>Ø fahrend</span></div>
@@ -1248,12 +1356,23 @@ function drawDetailMap() {
   const { points, ride } = S.detail;
   const an = S.detail.an;
   if (an) {
-    let run = [an.smp[0]], bucket = Math.round(an.smp[0].v / 10);
-    const flush = () => { if (run.length > 1) L.polyline(run.map(p => [p.lat, p.lng]), { color: speedColor(bucket * 10), weight: 6, opacity: 1, interactive: false }).addTo(S.dlayer); };
-    for (let i = 1; i < an.smp.length; i++) {
-      const p = an.smp[i], b = Math.round(p.v / 10);
-      run.push(p);
-      if (b !== bucket) { flush(); run = [p]; bucket = b; }
+    const sm = an.smp;
+    let run = [], bucket = null, est = false;
+    const flush = () => {
+      if (run.length > 1) {
+        const ll = run.map(p => [p.lat, p.lng]);
+        L.polyline(ll, est ? { color: cssVar('--mu'), weight: 4, opacity: .9, dashArray: '2 9', interactive: false }
+          : { color: speedColor(bucket * 10), weight: 6, opacity: 1, interactive: false }).addTo(S.dlayer);
+      }
+      run = [];
+    };
+    for (let i = 1; i < sm.length; i++) {
+      const a = sm[i - 1], b = sm[i];
+      if (b.kind === 2) { flush(); continue; }
+      const segEst = a.kind === 1 || b.kind === 1, bk = Math.round(b.v / 10);
+      if (run.length && (segEst !== est || (!segEst && bk !== bucket))) flush();
+      if (!run.length) { run = [a]; est = segEst; bucket = bk; }
+      run.push(b);
     }
     flush();
     for (const e of an.events) {
@@ -1279,13 +1398,13 @@ function renderDetail() {
   const { ride: r, calc, joinable } = S.detail;
   const driver = isMe(r.driver);
   const unit = fuelUnit(r.fuel_type);
-  const end = r.ended_at || S.feed.now || nowS();
-  const secs = end - r.started_at;
+  const end = r.ended_at || r.paused_at || S.feed.now || nowS();
+  const secs = end - r.started_at - (r.pause_total || 0);
   const avg = secs > 60 ? r.total_distance / (secs / 3600) : 0;
   const mine = r.my_part;
   const live = r.status === 'active';
 
-  let h = `<div class="d-date">${dateStr(r.started_at)} · ${timeStr(r.started_at)}${r.ended_at ? '–' + timeStr(r.ended_at) : ' · live'}</div>
+  let h = `<div class="d-date">${dateStr(r.started_at)} · ${timeStr(r.started_at)}${r.ended_at ? '–' + timeStr(r.ended_at) : r.paused_at ? ' · pausiert' : ' · live'}${r.pause_total >= 60 ? ` · ${dur(r.pause_total)} Pause` : ''}</div>
     <div class="d-title">${r.name ? esc(r.name) : driver ? 'Deine Fahrt' : `Fahrt mit ${esc(r.driver.username)}`}${driver || mine ? `<button class="x-btn rename" data-act="rename" aria-label="Umbenennen">${ICON.pen}</button>` : ''}</div>
     <div class="stats">
       <div class="stat"><b>${kmNum(r.total_distance)}<small>km</small></b><span>Strecke</span></div>
@@ -1941,6 +2060,9 @@ const ACT = {
   'confirm-yes': async () => { const f = S.confirmFn; S.confirmFn = null; closeSheet(); await f?.(); },
   locate: () => { S.follow = true; if (S.pos) centerOn(S.pos.lat, S.pos.lng, 16); else toast('Noch kein GPS-Signal'); },
   start: () => startRide(),
+  pause: el => pauseRide(+el.dataset.id),
+  resume: el => resumeRide(+el.dataset.id),
+  'hint-hide': () => { lsSet('bgHintHidden', '1'); renderHome(); },
   end: el => confirmSheet('Fahrt beenden?', 'Danach kannst du noch Spritpreis und Mitfahrer prüfen. Freunde können noch 30 Minuten nachträglich beitreten.', 'Beenden', () => endRide(+el.dataset.id)),
   discard: el => confirmSheet('Fahrt verwerfen?', 'Strecke und Mitfahrer werden gelöscht. Nutze das bei einem Fehlstart oder einer Testfahrt.', 'Verwerfen', () => discardRide(+el.dataset.id), true),
   join: el => askJoin(+el.dataset.id),
